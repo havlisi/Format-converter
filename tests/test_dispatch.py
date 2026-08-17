@@ -1,11 +1,44 @@
 import os
 import pytest
-from core.dispatch import convert, output_path_for, SUPPORTED_EXTS
+from core.dispatch import convert, ext_of, output_path_for, SUPPORTED_EXTS
 from core.csv_io import write_csv
 
 
 def test_supported_exts():
     assert set(SUPPORTED_EXTS) == {"pdf", "xlsx", "docx", "csv"}
+
+
+def test_ext_of_extensionless_path_returns_empty_string():
+    assert ext_of(os.path.join("C:", "my.folder", "README")) == ""
+
+
+def test_ext_of_ignores_dots_in_directory_names():
+    assert ext_of(os.path.join("my.folder", "data.csv")) == "csv"
+
+
+def test_convert_rejects_extensionless_source_with_clear_message(tmp_path):
+    p = tmp_path / "README"
+    p.write_text("hi")
+
+    with pytest.raises(ValueError, match=r"unsupported source format: \.\(none\)"):
+        convert(str(p), "csv")
+
+
+def test_convert_accepts_uppercase_target_ext(tmp_path):
+    src = tmp_path / "in.csv"
+    write_csv([("table", [["a"]])], str(src))
+
+    out_path = convert(str(src), "XLSX")
+
+    assert os.path.exists(out_path)
+
+
+def test_convert_rejects_empty_source_content(tmp_path):
+    src = tmp_path / "empty.csv"
+    src.write_text("")
+
+    with pytest.raises(ValueError, match="no content to convert"):
+        convert(str(src), "xlsx")
 
 
 def test_output_path_for_swaps_extension():

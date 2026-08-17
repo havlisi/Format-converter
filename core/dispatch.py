@@ -1,6 +1,11 @@
+import os
 from core import pdf_io, xlsx_io, docx_io, csv_io
 
 SUPPORTED_EXTS = ("pdf", "xlsx", "docx", "csv")
+
+
+def ext_of(path: str) -> str:
+    return os.path.splitext(os.path.basename(path))[1].lstrip(".").lower()
 
 _READERS = {
     "pdf": pdf_io.read_pdf,
@@ -22,13 +27,16 @@ def output_path_for(source_path: str, target_ext: str) -> str:
 
 
 def convert(source_path: str, target_ext: str) -> str:
-    source_ext = source_path.rsplit(".", 1)[-1].lower()
+    source_ext = ext_of(source_path)
+    target_ext = target_ext.lower()
     if source_ext not in SUPPORTED_EXTS:
-        raise ValueError(f"unsupported source format: .{source_ext}")
+        raise ValueError(f"unsupported source format: .{source_ext or '(none)'}")
     if target_ext not in SUPPORTED_EXTS:
-        raise ValueError(f"unsupported target format: .{target_ext}")
+        raise ValueError(f"unsupported target format: .{target_ext or '(none)'}")
 
     blocks = _READERS[source_ext](source_path)
+    if not blocks:
+        raise ValueError("source file has no content to convert")
     target_path = output_path_for(source_path, target_ext)
     _WRITERS[target_ext](blocks, target_path)
     return target_path

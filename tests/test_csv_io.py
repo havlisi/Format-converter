@@ -35,6 +35,17 @@ def test_read_csv_falls_back_to_cp1252_on_decode_error(tmp_path):
     assert blocks == [("table", [["Name", "City"], ["Bob", "café"]])]
 
 
+def test_write_csv_separates_consecutive_tables_with_blank_row(tmp_path):
+    p = tmp_path / "multi_sheet.csv"
+    blocks = [("table", [["Sheet1"]]), ("table", [["Sheet2"]])]
+
+    write_csv(blocks, str(p))
+
+    with open(p, newline="", encoding="utf-8") as f:
+        rows = list(csv.reader(f))
+    assert rows == [["Sheet1"], [], ["Sheet2"]]
+
+
 def test_write_csv_flattens_text_blocks(tmp_path):
     p = tmp_path / "out2.csv"
     blocks = [("text", "hello"), ("table", [["a"]])]

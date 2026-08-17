@@ -4,7 +4,7 @@ import tkinter as tk
 from tkinter import filedialog, ttk, messagebox
 
 from batch import scan_folder, run_batch, find_collisions
-from core.dispatch import SUPPORTED_EXTS, output_path_for
+from core.dispatch import SUPPORTED_EXTS, ext_of, output_path_for
 
 FILETYPES = [("Supported files", " ".join(f"*.{e}" for e in SUPPORTED_EXTS))]
 
@@ -82,8 +82,7 @@ class ConverterApp:
 
         overwrite_paths = []
         for path in self.row_ids:
-            source_ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
-            if source_ext == target_ext:
+            if ext_of(path) == target_ext:
                 continue
             candidate = output_path_for(path, target_ext)
             if os.path.exists(candidate):

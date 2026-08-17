@@ -20,10 +20,16 @@ def read_csv(path: str) -> List[Block]:
 
 def write_csv(blocks: List[Block], path: str) -> None:
     out_rows = []
+    prev_kind = None
     for kind, content in blocks:
+        # Separate consecutive tables (e.g. one per XLSX sheet) with a blank
+        # row so they don't merge into one ragged table on read-back.
+        if kind == "table" and prev_kind == "table":
+            out_rows.append([])
         if kind == "table":
             out_rows.extend(content)
         else:
             out_rows.append([content])
+        prev_kind = kind
     with open(path, "w", newline="", encoding="utf-8") as f:
         csv.writer(f).writerows(out_rows)

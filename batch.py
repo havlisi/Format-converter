@@ -1,6 +1,6 @@
 import os
 from typing import Callable, List, Tuple
-from core.dispatch import convert, output_path_for, SUPPORTED_EXTS
+from core.dispatch import convert, ext_of, output_path_for, SUPPORTED_EXTS
 
 
 def scan_folder(folder_path: str) -> List[str]:
@@ -9,8 +9,7 @@ def scan_folder(folder_path: str) -> List[str]:
         full = os.path.join(folder_path, name)
         if not os.path.isfile(full):
             continue
-        ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
-        if ext in SUPPORTED_EXTS:
+        if ext_of(name) in SUPPORTED_EXTS:
             found.append(full)
     return sorted(found)
 
@@ -24,8 +23,7 @@ def find_collisions(file_paths: List[str], target_ext: str) -> List[Tuple[str, s
     collisions: List[Tuple[str, str, str]] = []
     seen = {}  # output_path -> first source path that claimed it
     for path in file_paths:
-        source_ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
-        if source_ext == target_ext:
+        if ext_of(path) == target_ext:
             continue
         out_path = output_path_for(path, target_ext)
         if out_path in seen:
@@ -37,8 +35,7 @@ def find_collisions(file_paths: List[str], target_ext: str) -> List[Tuple[str, s
 
 def run_batch(file_paths: List[str], target_ext: str, on_row_update: Callable[[str, str], None]) -> None:
     for path in file_paths:
-        source_ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
-        if source_ext == target_ext:
+        if ext_of(path) == target_ext:
             on_row_update(path, f"skipped (already {target_ext})")
             continue
         try:
