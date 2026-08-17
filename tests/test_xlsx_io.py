@@ -1,4 +1,4 @@
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 from core.xlsx_io import read_xlsx, write_xlsx
 
 
@@ -34,3 +34,32 @@ def test_write_text_block_goes_in_column_a(tmp_path):
     result = read_xlsx(str(p))
 
     assert result == [("table", [["hello"], ["x"]])]
+
+
+def test_write_xlsx_does_not_turn_formula_looking_strings_into_formulas(tmp_path):
+    p = tmp_path / "formulas.xlsx"
+    blocks = [("table", [["=SUM(A1:A2)", "+1+2", "-1-2", "@SUM(A1)", "plain"]])]
+
+    write_xlsx(blocks, str(p))
+
+    # Verify at the openpyxl level that no cell was stored as an actual formula.
+    wb = load_workbook(str(p))
+    ws = wb.active
+    for cell in ws[1]:
+        assert cell.data_type != "f"
+
+    result = read_xlsx(str(p))
+    assert result == [("table", [["=SUM(A1:A2)", "+1+2", "-1-2", "@SUM(A1)", "plain"]])]
+
+
+def test_read_xlsx_falls_back_to_formula_text_when_no_cached_value(tmp_path):
+    p = tmp_path / "uncached_formula.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["Label", "Value"])
+    ws.append(["total", "=SUM(A1:A1)"])  # written as a real formula, no cached result
+    wb.save(p)
+
+    result = read_xlsx(str(p))
+
+    assert result == [("table", [["Label", "Value"], ["total", "=SUM(A1:A1)"]])]

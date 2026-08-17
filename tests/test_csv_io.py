@@ -22,6 +22,19 @@ def test_write_csv_round_trip(tmp_path):
     assert rows == [["Name", "Age"], ["Bob", "30"]]
 
 
+def test_read_csv_falls_back_to_cp1252_on_decode_error(tmp_path):
+    p = tmp_path / "windows.csv"
+    # "café" encoded as cp1252 (Windows-1252) — not valid utf-8, so a plain
+    # utf-8-sig read would raise UnicodeDecodeError.
+    content = "Name,City\r\nBob,caf\xe9\r\n"
+    with open(p, "wb") as f:
+        f.write(content.encode("cp1252"))
+
+    blocks = read_csv(str(p))
+
+    assert blocks == [("table", [["Name", "City"], ["Bob", "café"]])]
+
+
 def test_write_csv_flattens_text_blocks(tmp_path):
     p = tmp_path / "out2.csv"
     blocks = [("text", "hello"), ("table", [["a"]])]
