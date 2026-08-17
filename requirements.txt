@@ -1,0 +1,5 @@
+pdfplumber
+reportlab
+openpyxl
+python-docx
+pytest
