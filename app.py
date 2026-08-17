@@ -3,8 +3,8 @@ import os
 import tkinter as tk
 from tkinter import filedialog, ttk, messagebox
 
-from batch import scan_folder, run_batch
-from core.dispatch import SUPPORTED_EXTS
+from batch import scan_folder, run_batch, find_collisions
+from core.dispatch import SUPPORTED_EXTS, output_path_for
 
 FILETYPES = [("Supported files", " ".join(f"*.{e}" for e in SUPPORTED_EXTS))]
 
@@ -66,12 +66,26 @@ class ConverterApp:
             return
         target_ext = self.target_var.get()
 
+        collisions = find_collisions(list(self.row_ids.keys()), target_ext)
+        if collisions:
+            lines = "\n".join(
+                f"{os.path.basename(a)} and {os.path.basename(b)} -> {os.path.basename(out)}"
+                for a, b, out in collisions
+            )
+            messagebox.showerror(
+                "Conflicting output files",
+                "These queued files would overwrite each other's output "
+                f"and cannot be converted together:\n{lines}\n\n"
+                "Rename one of each pair or convert them separately.",
+            )
+            return
+
         overwrite_paths = []
         for path in self.row_ids:
             source_ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
             if source_ext == target_ext:
                 continue
-            candidate = path.rsplit(".", 1)[0] + "." + target_ext
+            candidate = output_path_for(path, target_ext)
             if os.path.exists(candidate):
                 overwrite_paths.append(candidate)
         if overwrite_paths:

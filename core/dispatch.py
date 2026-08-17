@@ -17,6 +17,10 @@ _WRITERS = {
 }
 
 
+def output_path_for(source_path: str, target_ext: str) -> str:
+    return source_path.rsplit(".", 1)[0] + "." + target_ext
+
+
 def convert(source_path: str, target_ext: str) -> str:
     source_ext = source_path.rsplit(".", 1)[-1].lower()
     if source_ext not in SUPPORTED_EXTS:
@@ -25,6 +29,6 @@ def convert(source_path: str, target_ext: str) -> str:
         raise ValueError(f"unsupported target format: .{target_ext}")
 
     blocks = _READERS[source_ext](source_path)
-    target_path = source_path.rsplit(".", 1)[0] + "." + target_ext
+    target_path = output_path_for(source_path, target_ext)
     _WRITERS[target_ext](blocks, target_path)
     return target_path

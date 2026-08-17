@@ -1,11 +1,24 @@
 import os
 import pytest
-from core.dispatch import convert, SUPPORTED_EXTS
+from core.dispatch import convert, output_path_for, SUPPORTED_EXTS
 from core.csv_io import write_csv
 
 
 def test_supported_exts():
     assert set(SUPPORTED_EXTS) == {"pdf", "xlsx", "docx", "csv"}
+
+
+def test_output_path_for_swaps_extension():
+    assert output_path_for("/some/dir/data.csv", "xlsx") == "/some/dir/data.xlsx"
+
+
+def test_output_path_for_matches_convert_result(tmp_path):
+    src = tmp_path / "in.csv"
+    write_csv([("table", [["a"]])], str(src))
+
+    out_path = convert(str(src), "xlsx")
+
+    assert out_path == output_path_for(str(src), "xlsx")
 
 
 def test_convert_rejects_unsupported_target(tmp_path):
