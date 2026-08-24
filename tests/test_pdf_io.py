@@ -68,6 +68,37 @@ def test_table_content_not_duplicated_in_text_block(tmp_path):
     assert "Outro line after table" in joined_text
 
 
+def test_reconstructs_borderless_financial_statement(tmp_path):
+    p = tmp_path / "stmt.pdf"
+    # Synthetic bank-statement text: date + payee + amount + running balance per
+    # transaction, no ruling lines — the shape pdfplumber's own table detector fails
+    # on for real statements. "RE.500,00" mimics an invoice reference that looks
+    # like a second amount but has no currency code after it, so it must be ignored.
+    lines = [
+        "Kontoauszug Testbank",
+        "01.01.2024 Acme Corp Miete Januar 1.000,00 EUR 5.000,00 EUR",
+        "166 continuation code line",
+        "02.01.2024 Beta LLC RE.500,00 Nebenkosten -200,00 EUR 4.800,00 EUR",
+        "ref continuation IBAN DE89370400440532013000",
+    ]
+    write_pdf([("text", "\n".join(lines))], str(p))
+    result = read_pdf(str(p))
+
+    tables = [c for k, c in result if k == "table"]
+    assert tables, "expected the borderless statement to be reconstructed as a table"
+    table = tables[0]
+    assert table[0][0] == "Date"
+    rows = table[1:]
+    assert len(rows) == 2
+    assert rows[0][0] == "01.01.2024"
+    assert rows[0][1] == "1.000,00"
+    assert rows[0][2] == "5.000,00"
+    assert rows[1][0] == "02.01.2024"
+    assert rows[1][1] == "-200,00"
+    assert rows[1][2] == "4.800,00"  # not the "RE.500,00" reference number
+    assert "DE89370400440532013000" in rows[1][3]
+
+
 def test_wide_table_does_not_raise_and_produces_file(tmp_path):
     p = tmp_path / "wide.pdf"
     num_cols = 15
