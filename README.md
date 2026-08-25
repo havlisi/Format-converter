@@ -1,11 +1,15 @@
 # Format Converter
 
-Batch-converts between PDF, XLSX, DOCX, CSV. Content-fidelity (text + tables), not pixel-perfect layout. Text-layer PDFs only — no OCR.
+Batch-converts between PDF, XLSX, DOCX, CSV. Content-fidelity (text + tables), not pixel-perfect layout.
 
 ## Setup
 
     cd converter
     pip install -r requirements.txt
+
+Scanned PDFs (no text layer) also need [Tesseract OCR](https://github.com/UB-Mannheim/tesseract/wiki) installed
+separately (`winget install UB-Mannheim.TesseractOCR` on Windows) — `pip install` alone doesn't provide it. Without
+it, a scanned PDF fails with a clear message telling you to install it; a normal text-layer PDF works either way.
 
 ## Run
 
@@ -17,7 +21,11 @@ Batch-converts between PDF, XLSX, DOCX, CSV. Content-fidelity (text + tables), n
 
 ## Known limitations
 
-- Text-layer PDFs only — scanned/image PDFs raise an error (no OCR).
+- Scanned (image-only) PDFs are converted via OCR (Tesseract), which is meaningfully less reliable than a real text
+  layer — digit misreads (0/O, 1/l, 6/8, ...) are a real risk no OCR engine fully eliminates. **Always spot-check
+  OCR'd numbers against the original scan before trusting them for financial records.** A word Tesseract itself
+  flagged as low-confidence is wrapped in `¿...?` in the output so it stands out as worth checking rather than being
+  presented as plain, trustworthy text.
 - Content-fidelity, not pixel-perfect: fonts, colors, images, and exact page layout aren't reproduced.
 - A source file with no extractable content (e.g. a blank PDF) reports an error rather than producing an empty output.
 - Multi-sheet XLSX → CSV concatenates all sheets into one file, separated by a blank row; sheet names aren't preserved.

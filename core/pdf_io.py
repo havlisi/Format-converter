@@ -1,4 +1,6 @@
+import os
 import re
+import shutil
 import pdfplumber
 from xml.sax.saxutils import escape
 from reportlab.lib.pagesizes import letter
@@ -7,6 +9,11 @@ from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Table, TableStyle, Spacer
 from core.types import Block
 from typing import List, Optional, Tuple
+
+try:
+    import pytesseract
+except ImportError:
+    pytesseract = None
 
 # Two decimal conventions, both seen in real statements: European (thousands with
 # dots, decimal comma — "1.234,56") and international (thousands with commas,
@@ -167,6 +174,80 @@ def _page_line_words(page) -> List[List[dict]]:
 
 def _line_text(words: List[dict]) -> str:
     return " ".join(w["text"] for w in words)
+
+
+# Rendering DPI for OCR — a compromise between recognition accuracy (higher is
+# better, up to a point) and how long each scanned page takes to process.
+_OCR_RESOLUTION = 300
+_OCR_POINTS_PER_PIXEL = 72 / _OCR_RESOLUTION
+# Tesseract's own 0-100 confidence; words below this are still included (dropping
+# them would silently delete data) but are unreliable enough to flag rather than
+# present as plain, trustworthy text.
+_OCR_LOW_CONFIDENCE = 40
+
+
+def _ocr_page_line_words(page) -> List[List[dict]]:
+    """OCR fallback for a page with no text layer at all (a scanned image PDF).
+
+    Renders the page to an image and runs Tesseract, converting its word-level
+    output into the same {text, x0, x1, top, bottom} shape pdfplumber's own
+    extract_words() produces (pixel coordinates scaled back to PDF points) — so
+    everything downstream (line grouping, column reconstruction, the generic
+    date+amount anchor fallback) treats an OCR'd page exactly like a normal one,
+    with no separate code path to keep in sync.
+
+    OCR text is fundamentally not as trustworthy as a real text layer — digit
+    misreads (0/O, 1/l, 6/8, ...) are a real risk no engine fully eliminates.
+    A low-confidence word is wrapped in "¿...?" rather than silently presented as
+    plain text, so it stays visible in the output as something worth checking by
+    eye instead of being trusted at face value.
+    """
+    if pytesseract is None:
+        raise RuntimeError(
+            "This PDF is a scanned image with no text layer, so it needs OCR — but "
+            "Tesseract isn't installed. Install it (e.g. `winget install "
+            "UB-Mannheim.TesseractOCR`), then try again."
+        )
+    if pytesseract.pytesseract.tesseract_cmd == "tesseract" and not shutil.which("tesseract"):
+        # Not on PATH yet (a fresh install can need a shell/PATH refresh) — fall back
+        # to Windows' default install location rather than failing outright.
+        default_windows_path = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+        if os.path.exists(default_windows_path):
+            pytesseract.pytesseract.tesseract_cmd = default_windows_path
+    image = page.to_image(resolution=_OCR_RESOLUTION).original
+    try:
+        data = pytesseract.image_to_data(image, output_type=pytesseract.Output.DICT)
+    except pytesseract.TesseractNotFoundError as exc:
+        raise RuntimeError(
+            "This PDF is a scanned image with no text layer, so it needs OCR — but "
+            "the Tesseract program couldn't be run. Install it (e.g. `winget install "
+            "UB-Mannheim.TesseractOCR`), then try again."
+        ) from exc
+
+    lines: dict = {}
+    for i in range(len(data["text"])):
+        text = data["text"][i].strip()
+        if not text:
+            continue
+        try:
+            confidence = int(float(data["conf"][i]))
+        except (TypeError, ValueError):
+            confidence = -1
+        if 0 <= confidence < _OCR_LOW_CONFIDENCE:
+            text = f"¿{text}?"
+        x0 = data["left"][i] * _OCR_POINTS_PER_PIXEL
+        top = data["top"][i] * _OCR_POINTS_PER_PIXEL
+        word = {
+            "text": text,
+            "x0": x0,
+            "x1": x0 + data["width"][i] * _OCR_POINTS_PER_PIXEL,
+            "top": top,
+            "bottom": top + data["height"][i] * _OCR_POINTS_PER_PIXEL,
+        }
+        # A coarser row tolerance than the text-layer path's — OCR line boxes jitter
+        # a few pixels more than a real text layer's baked-in glyph positions do.
+        lines.setdefault(round(top / 3) * 3, []).append(word)
+    return [sorted(ws, key=lambda w: w["x0"]) for _top, ws in sorted(lines.items())]
 
 
 def _cluster_header_columns(header_words: List[dict]) -> List[Tuple[str, float]]:
@@ -484,12 +565,18 @@ def read_pdf(path: str) -> List[Block]:
                 if text:
                     blocks.append(("text", text))
             else:
+                page_words = _page_line_words(page)
+                if not page_words and page.images:
+                    # No text layer, but the page has an embedded image — a scanned
+                    # page. OCR it rather than silently contributing nothing (a page
+                    # that's genuinely blank has no image either, and is left as-is).
+                    page_words = _ocr_page_line_words(page)
                 if pending_lines:
                     pending_lines.append(_PAGE_BREAK)
-                pending_lines.extend(_page_line_words(page))
+                pending_lines.extend(page_words)
         flush_pending()
     if not blocks:
-        raise ValueError("no extractable text — likely scanned image, OCR not supported")
+        raise ValueError("no extractable text — the PDF appears to be blank")
     return blocks
 
 

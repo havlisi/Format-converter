@@ -3,3 +3,4 @@ reportlab
 openpyxl
 python-docx
 pytest
+pytesseract
