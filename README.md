@@ -36,10 +36,13 @@ it, a scanned PDF fails with a clear message telling you to install it; a normal
   from each transaction's date + currency-tagged amount anchor — payee, purpose, and reference codes are kept as one
   merged "Description" column rather than guessed into separate fields, since that split isn't reliable across every
   bank's export layout. Dates and amounts are the parts that must never be misattributed.
-- Transaction dates must be dot-separated (`DD.MM.YYYY`, or `DD.MM.` with the year wrapped onto the next line) and
-  carry their own year — a slash format (`DD/MM`) or a date with the year stated only once for the whole document
-  isn't recognized as a row yet, so those statements fall back to plain text.
+- Transaction dates are recognized either dot-separated (`DD.MM.YYYY`, or `DD.MM.` with the year wrapped onto the
+  next line) or slash-separated (`DD/MM/YYYY`, or `DD/MM` with no year on the line at all — the year is then
+  inferred from the first full date found earlier in the document, e.g. a statement period like
+  "Vom 01/03/2025 bis zum 31/03/2025").
 - Amounts are recognized in European (`1.234,56`) or international (`1,234.56`) notation, with an optional leading
-  sign or trailing German Haben/Soll marker (`H`/`S`), each either glued to the number or separated by a space.
+  sign or trailing German Haben/Soll marker (`H`/`S`), each either glued to the number or separated by a space. A
+  debit/credit column pair (e.g. "Belastung"/"Gutschrift", "Soll"/"Haben") — where only one side is ever populated
+  per row — is routed by the amount's own sign rather than assumed to always fill the first column.
 - Documents that aren't row-per-transaction (e.g. one transaction described per page as label/value pairs) aren't
   restructured into a table — the text is preserved, just not split into columns.

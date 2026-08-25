@@ -81,7 +81,23 @@ _SPLIT_DATE_RE = re.compile(r"(\d{1,2}\.\d{1,2}\.)\s*(\d{4})")
 # earlier where the time no longer immediately follows, and matching anyway.
 # Forcing a choice between "there's a 4-digit year here, and no time after it" and
 # "there's no 4-digit year here at all" closes that loophole.
-_ROW_START_DATE_RE = re.compile(r"^\d{1,2}\.\d{1,2}\.(?:\d{4}(?!\s*\d{1,2}:\d{2})|(?!\d{4}))")
+_ROW_START_DATE_DOT_RE = r"\d{1,2}\.\d{1,2}\.(?:\d{4}(?!\s*\d{1,2}:\d{2})|(?!\d{4}))"
+# Some exports (e.g. Qonto) use a slash date with no year on the transaction line at
+# all — just "11/03" — the year is stated once for the whole statement instead (see
+# _infer_year below). No trailing anchor: a narrow gap between a "date" column and
+# the next one can fall under the column-clustering threshold and merge them, so the
+# date bucket may carry the row's description right after it too, same as the dot
+# format's glued-word case.
+_ROW_START_DATE_SLASH_RE = r"\d{1,2}/\d{1,2}(?:/\d{2,4})?"
+_ROW_START_DATE_RE = re.compile(rf"^(?:{_ROW_START_DATE_DOT_RE}|{_ROW_START_DATE_SLASH_RE})")
+# A slash date with its year present, vs. without — the latter needs a year inferred
+# from elsewhere in the document (see _infer_year).
+_SLASH_DATE_FULL_RE = re.compile(r"\b(\d{1,2})/(\d{1,2})/(\d{2,4})\b")
+_SLASH_DATE_PARTIAL_RE = re.compile(r"\b(\d{1,2})/(\d{1,2})\b")
+# A normalized date value (dot or slash, always with a year by the time it's checked)
+# — used to validate that a date column actually produced real dates, not leftover
+# junk, without being as strict as _DATE_RE's exact 2-2-4-digit dot shape.
+_DATE_VALID_RE = re.compile(r"^\d{1,2}\.\d{1,2}\.\d{4}$|^\d{1,2}/\d{1,2}/\d{2,4}$")
 
 # Column-header keyword matches (case-insensitive, matched as a substring so
 # abbreviated headers like "Werts.." or "Umsatz" still hit) used to find a
@@ -91,9 +107,16 @@ _HEADER_AMOUNT_LABEL_RE = re.compile(
     r"(betrag|saldo|umsatz|amount|balance|belastung|gutschrift|credit|debit)", re.IGNORECASE
 )
 # Header words closer together than this (points) are one multi-word column label
-# (e.g. "Sender / Empfänger"); farther apart marks a new column. Picked from the
-# real gaps seen in test statements: ~2-3pt within a label, 8pt+ between columns.
-_COLUMN_GAP_THRESHOLD = 8.0
+# (e.g. "Sender / Empfänger"); farther apart marks a new column. Real statements seen
+# so far put same-label gaps at ~2-3pt and different-column gaps at ~9pt or more —
+# except one case ("Abrechnungstag" / "Transaktionen", ~7.3pt) that's genuinely two
+# separate columns, which merging them wrongly loses (the transaction description
+# comes out blank, folded into the date column with nowhere to go). 6.0 sits in the
+# gap between the two groups and correctly splits that case too.
+_COLUMN_GAP_THRESHOLD = 6.0
+# Key for a row dict's raw, unbucketed physical-line text (see _reconstruct_columned_
+# table). A string, not an int, so it can't collide with a real column index.
+_RAW_LINES_KEY = "_raw"
 
 # Below this fraction of populated cells, a pdfplumber-detected table is treated as a
 # failed detection (e.g. a borderless statement collapsed into one text-heavy column)
@@ -124,14 +147,29 @@ def _parse_first_bare_amount(text: str) -> str:
     return _normalize_amount(match.group(1), match.group(2), match.group(3))
 
 
-def _normalize_date(text: str) -> str:
+def _normalize_date(text: str, inferred_year: Optional[str] = None) -> str:
     match = _DATE_RE.search(text)
     if match:
         return match.group()
     match = _SPLIT_DATE_RE.search(text)
     if match:
         return match.group(1) + match.group(2)
+    match = _SLASH_DATE_FULL_RE.search(text)
+    if match:
+        return f"{match.group(1)}/{match.group(2)}/{match.group(3)}"
+    match = _SLASH_DATE_PARTIAL_RE.search(text)
+    if match:
+        year_suffix = f"/{inferred_year}" if inferred_year else ""
+        return f"{match.group(1)}/{match.group(2)}{year_suffix}"
     return text.strip()
+
+
+def _infer_year(text: str) -> Optional[str]:
+    """A slash-dated statement may state the year only once for the whole document
+    (e.g. "Vom 01/03/2025 bis zum 31/03/2025") rather than on each transaction line —
+    this recovers it from whatever preamble text preceded the first transaction."""
+    match = _SLASH_DATE_FULL_RE.search(text)
+    return match.group(3) if match else None
 
 
 def _bbox_overlaps(obj: dict, bbox: tuple) -> bool:
@@ -336,6 +374,20 @@ def _reconstruct_columned_table(lines: List[List[dict]]) -> Tuple[Optional[List[
     anchor_date_col = min(date_cols)
     amount_cols = {i for i, l in enumerate(labels) if _HEADER_AMOUNT_LABEL_RE.search(l)}
 
+    # A statement whose transaction dates omit the year (e.g. slash dates like
+    # "11/03") usually states it once, in text that precedes the header — scan the
+    # whole document up front for the first full date, rather than only the text
+    # that ends up in `preamble_parts` below (which only starts collecting once the
+    # header's already been seen, so it wouldn't include this).
+    inferred_year: Optional[str] = None
+    for words in lines:
+        if words is _PAGE_BREAK or words is header_words:
+            continue
+        year = _infer_year(_line_text(words))
+        if year:
+            inferred_year = year
+            break
+
     preamble_parts: List[str] = []
     # Lines seen before the first transaction row (account title, holder, date range,
     # opening balance) — a multi-page statement repeats this exact block on every page,
@@ -382,12 +434,14 @@ def _reconstruct_columned_table(lines: List[List[dict]]) -> Tuple[Optional[List[
             if current:
                 rows.append(current)
             current = {i: [] for i in range(len(columns))}
+            current[_RAW_LINES_KEY] = []
         elif current is None:
             if seen_header:
                 preamble_parts.append(line_text)
                 preamble_line_set.add(line_text)
             continue
 
+        current[_RAW_LINES_KEY].append(line_text)
         for i, bucket in enumerate(buckets):
             if bucket:
                 current[i].append(" ".join(bucket))
@@ -398,36 +452,71 @@ def _reconstruct_columned_table(lines: List[List[dict]]) -> Tuple[Optional[List[
         return None, None
 
     amount_col_order = sorted(amount_cols)
+    # A 2-amount-column layout is either a debit/credit split (e.g. "Belastung"/
+    # "Gutschrift" — exactly one of the two is ever populated per row, by design) or
+    # a running-total pair (e.g. "Betrag"/"Saldo" — both should be present on every
+    # row). Which one this document is changes what "valid" means below, and can't
+    # be decided from a single row: a debit/credit split and a running-total row
+    # that failed to capture its second value both look like "1 amount found" in
+    # isolation. Deciding from whether *any* row in the document ever produced 2
+    # tells them apart — a real running-total pair will show 2 somewhere; a genuine
+    # split pair never will.
+    row_amounts_by_row = [_extract_amounts(" ".join(r.get(_RAW_LINES_KEY, []))) for r in rows]
+    is_split_pair = len(amount_col_order) == 2 and max(
+        (len(a) for a in row_amounts_by_row), default=0
+    ) <= 1
+
     row_outputs = []
     any_iban = False
     valid_amounts = 0
     valid_dates = 0
-    total_amount_slots = len(rows) * len(amount_col_order)
-    for r in rows:
+    total_amount_rows = len(rows) if amount_col_order else 0
+    for r, row_amounts in zip(rows, row_amounts_by_row):
         full_text_parts = [" ".join(r.get(i, [])) for i in range(len(columns))]
-        # Amount columns are often right-aligned in the source, so a value's left edge
-        # can drift into the *previous* column's x-range — bucketing alone misplaces it.
-        # Scanning the whole row's text for currency-tagged amounts, in reading order,
-        # and assigning them positionally to the amount columns sidesteps that; a column
-        # whose own text had no currency marker next to it (e.g. a repeated total with
-        # no "EUR" of its own) falls back to reading its own bucket directly.
-        row_amounts = _extract_amounts(" ".join(full_text_parts))
-        amount_values = {}
-        ai = 0
-        for col_i in amount_col_order:
-            if ai < len(row_amounts):
-                amount_values[col_i] = row_amounts[ai]
-                ai += 1
-            else:
-                amount_values[col_i] = _parse_first_bare_amount(full_text_parts[col_i])
-            if amount_values[col_i]:
+        amount_values = {col_i: "" for col_i in amount_col_order}
+        if is_split_pair and len(row_amounts) == 1:
+            # Route the one value found by its own sign — the universal convention
+            # is debit (negative) before credit (positive) — rather than always
+            # placing it in the first amount column regardless of which side it's
+            # really on.
+            amt = row_amounts[0]
+            target_col = amount_col_order[0] if amt.startswith("-") else amount_col_order[1]
+            amount_values[target_col] = amt
+        else:
+            # Amount columns are often right-aligned in the source, so a value's left
+            # edge can drift into the *previous* column's x-range — bucketing alone
+            # misplaces it. Assigning the row's amounts (found in original reading
+            # order, not column-reordered order — see row_amounts_by_row above)
+            # positionally to the amount columns in header order sidesteps that; a
+            # column whose own text had no currency marker next to it (e.g. a
+            # repeated total with no "EUR" of its own) falls back to reading its own
+            # bucket directly.
+            ai = 0
+            for col_i in amount_col_order:
+                if ai < len(row_amounts):
+                    amount_values[col_i] = row_amounts[ai]
+                    ai += 1
+                else:
+                    amount_values[col_i] = _parse_first_bare_amount(full_text_parts[col_i])
+
+        if is_split_pair:
+            # By design only one column is ever expected to be populated — the row
+            # is fully captured as long as routing found that one value.
+            if any(amount_values[col_i] for col_i in amount_col_order):
+                valid_amounts += 1
+        else:
+            # Every amount column is expected on every row (e.g. Betrag *and*
+            # Saldo) — a missing one is a genuine extraction gap, not a legitimate
+            # blank, so it must count against validity or a systematic failure
+            # (e.g. one column silently never captured) would go undetected.
+            if all(amount_values[col_i] for col_i in amount_col_order):
                 valid_amounts += 1
 
         row_out = []
         for i in range(len(columns)):
             if i in date_cols:
-                value = _normalize_date(full_text_parts[i])
-                if i == anchor_date_col and _DATE_RE.fullmatch(value):
+                value = _normalize_date(full_text_parts[i], inferred_year)
+                if i == anchor_date_col and _DATE_VALID_RE.fullmatch(value):
                     valid_dates += 1
                 row_out.append(value)
             elif i in amount_cols:
@@ -442,7 +531,7 @@ def _reconstruct_columned_table(lines: List[List[dict]]) -> Tuple[Optional[List[
     # Sanity gate: if amount/date columns mostly failed to parse, this document's
     # layout doesn't actually fit the column model we built — don't ship a table with
     # silently wrong or missing financial values, fall back to the plainer reconstruction.
-    if total_amount_slots and valid_amounts / total_amount_slots < 0.9:
+    if total_amount_rows and valid_amounts / total_amount_rows < 0.9:
         return None, None
     if valid_dates / len(rows) < 0.9:
         return None, None
