@@ -51,7 +51,11 @@ _AMOUNT_NUM = (
 # "RE.476,29" that would otherwise be mistaken for a second amount and shift every
 # column after it.
 _AMOUNT_RE = re.compile(rf"([+-]\s?)?({_AMOUNT_NUM})\s?([HS])?\s*(?:EUR|USD|GBP|CHF|RSD)\b")
-_DATE_RE = re.compile(r"\b\d{2}\.\d{2}\.\d{4}\b")
+# Dot-separated (European, "02.01.2024") or slash-separated (US-style, "08/18/2026")
+# — both with a full year on the same line. (The slash format with no year at all,
+# e.g. "11/03", is handled separately — see _SLASH_DATE_PARTIAL_RE below — since it
+# needs the surrounding document's context to resolve a year.)
+_DATE_RE = re.compile(r"\b\d{1,2}[./]\d{1,2}[./]\d{2,4}\b")
 # IBANs appear either compact ("DE76550104001041824990") or human-readable with a
 # space every 4 characters ("DE75 1203 0000 0001 2987 77") — both must match. The
 # spaced groups are restricted to digits: letting them match letters too would let

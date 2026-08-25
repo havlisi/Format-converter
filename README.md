@@ -44,5 +44,10 @@ it, a scanned PDF fails with a clear message telling you to install it; a normal
   sign or trailing German Haben/Soll marker (`H`/`S`), each either glued to the number or separated by a space. A
   debit/credit column pair (e.g. "Belastung"/"Gutschrift", "Soll"/"Haben") — where only one side is ever populated
   per row — is routed by the amount's own sign rather than assumed to always fill the first column.
-- Documents that aren't row-per-transaction (e.g. one transaction described per page as label/value pairs) aren't
-  restructured into a table — the text is preserved, just not split into columns.
+- Documents that aren't row-per-transaction (e.g. one transaction described per page as label/value pairs, with its
+  date and amount landing on the same line) still get a Date/Amount/IBAN/Description row per transaction via the
+  generic fallback — the surrounding label/value fields aren't split into their own columns, just kept as readable
+  text, since there's no repeating header row to derive a real column layout from.
+- If the source PDF's own font renders two adjacent header cells with zero space between them (a defect in the PDF
+  itself, not something we control), the header labels split at wherever pdfplumber happens to break the run rather
+  than at the real label boundaries — the transaction data below is unaffected, only those header names are garbled.
