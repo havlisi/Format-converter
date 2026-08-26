@@ -91,8 +91,16 @@ _ROW_START_DATE_DOT_RE = r"\d{1,2}\.\d{1,2}\.(?:\d{4}(?!\s*\d{1,2}:\d{2})|(?!\d{
 # _infer_year below). No trailing anchor: a narrow gap between a "date" column and
 # the next one can fall under the column-clustering threshold and merge them, so the
 # date bucket may carry the row's description right after it too, same as the dot
-# format's glued-word case.
-_ROW_START_DATE_SLASH_RE = r"\d{1,2}/\d{1,2}(?:/\d{2,4})?"
+# format's glued-word case. The trailing "not a clock time" guard mirrors the dot
+# format's own — a page's printed generation timestamp ("5/5/2026 6:35 PM ...") also
+# starts with a slash date, and without this it spawns a bogus row on every page.
+#
+# The year is matched as an explicit either/or, same as the dot format's own (see
+# above) and for the same reason: a plain optional `(?:/\d{2,4})?` would let the
+# engine dodge the lookahead by backtracking the year's digit count down (even to
+# a partial, wrong-length match like "202" out of "2026") until what follows no
+# longer looks like a time, then matching anyway.
+_ROW_START_DATE_SLASH_RE = r"\d{1,2}/\d{1,2}(?:/\d{2,4}(?!\d)(?!\s*\d{1,2}:\d{2})|(?!/\d))"
 _ROW_START_DATE_RE = re.compile(rf"^(?:{_ROW_START_DATE_DOT_RE}|{_ROW_START_DATE_SLASH_RE})")
 # A slash date with its year present, vs. without — the latter needs a year inferred
 # from elsewhere in the document (see _infer_year).
@@ -414,6 +422,19 @@ def _reconstruct_columned_table(lines: List[List[dict]]) -> Tuple[Optional[List[
         return None, None
     anchor_date_col = min(date_cols)
     amount_cols = {i for i, l in enumerate(labels) if _HEADER_AMOUNT_LABEL_RE.search(l)}
+    # A column whose clustered label matches BOTH a date and an amount keyword
+    # isn't a real single-purpose column — it's several adjacent header cells
+    # rendered with zero gap between them (a font-kerning artifact seen in real
+    # statements, e.g. "Wertstellung BuchungstextBeguenstigterVerwendungszweck
+    # Betrag" clustering as one "column"). Typing it as either would extract
+    # just a date (or just an amount) and silently discard everything else
+    # that landed in its bucket — the row's real payee, description, and
+    # amount. Left untyped instead, its full raw text survives — lossy, but
+    # not a silently vanished amount. The anchor is exempted: row-start
+    # detection already depends on it being a real date column.
+    ambiguous_cols = (date_cols & amount_cols) - {anchor_date_col}
+    date_cols -= ambiguous_cols
+    amount_cols -= ambiguous_cols
 
     # A statement whose transaction dates omit the year (e.g. slash dates like
     # "11/03") usually states it once, in text that precedes the header — scan the

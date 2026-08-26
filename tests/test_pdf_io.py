@@ -5,6 +5,7 @@ from core.pdf_io import (
     _find_header_words,
     _is_degenerate_table,
     _PAGE_BREAK,
+    _ROW_START_DATE_RE,
 )
 import pytest
 
@@ -431,3 +432,62 @@ def test_opening_balance_line_before_first_row_is_not_merged_into_it():
     assert table[1][betrag_col] == "-500,00"
     assert "Kontostand" not in table[1][desc_col]
     assert preamble and "Kontostand" in preamble
+
+
+def test_header_column_matching_both_date_and_amount_keywords_is_left_untyped():
+    # Real-world shape (a Sparkasse/SFirm export): a font-kerning artifact in the
+    # source PDF renders several adjacent header cells with zero gap between them
+    # ("Wertstellung BuchungstextBeguenstigterVerwendungszweckBetrag" as one
+    # clustered "column"). That merged label contains both a date keyword
+    # ("Wert...") and an amount keyword ("...Betrag"), so it would be typed as
+    # a date column - and typed date-extraction only ever pulls a date
+    # substring back out, silently discarding everything else that landed in
+    # its (very wide) bucket: the row's real payee, description, and amount.
+    # Left untyped, its full raw text survives instead - lossy, but not a
+    # silently vanished amount.
+    header = [
+        _word("Buchung", 0, 60, 0),
+        _word("WertstellungBuchungstextBetrag", 70, 300, 0),
+        _word("Waehrung", 400, 460, 0),
+    ]
+    row1 = [
+        _word("1/2/2026", 0, 50, 100),
+        _word("1/2/2026", 70, 120, 100),
+        _word("Ueberweisung", 125, 200, 100),
+        _word("150.00", 205, 250, 100),
+        _word("H", 252, 260, 100),
+        _word("EUR", 400, 430, 100),
+    ]
+    row2 = [
+        _word("1/3/2026", 0, 50, 120),
+        _word("1/3/2026", 70, 120, 120),
+        _word("Lastschrift", 125, 200, 120),
+        _word("75.00", 205, 250, 120),
+        _word("S", 252, 260, 120),
+        _word("EUR", 400, 430, 120),
+    ]
+    lines = [header, row1, row2]
+
+    table, _preamble = _reconstruct_columned_table(lines)
+
+    assert table, "expected the column reconstruction to succeed"
+    merged_col = table[0].index("WertstellungBuchungstextBetrag")
+    assert "150.00" in table[1][merged_col]
+    assert "Ueberweisung" in table[1][merged_col]
+
+
+def test_slash_date_row_start_excludes_a_page_footer_timestamp():
+    # A page's printed generation timestamp ("5/5/2026 6:35 PM LIVIUSFACH 1 von
+    # 32") starts with a slash date exactly like a real transaction line does —
+    # the dot-date row-start pattern already guards against this shape (a clock
+    # time immediately following the date marks a timestamp, not a
+    # transaction), but the slash-date pattern never got the same guard. Left
+    # unguarded, every page's footer spawns a bogus row, and each one reports
+    # a page number ("1 von 32") as its own amount-column content — which
+    # fails to parse as an amount, silently dragging a real statement's
+    # extraction success rate down page by page.
+    assert _ROW_START_DATE_RE.match("5/5/2026 6:35 PM LIVIUSFACH 1 von 32") is None
+    # A real transaction's own following content must still match, though —
+    # this must not become a trailing anchor that rejects ordinary rows.
+    assert _ROW_START_DATE_RE.match("5/5/2026 Ueberweisung PropCo Spring")
+    assert _ROW_START_DATE_RE.match("11/03Nobelstr. 50-55")
