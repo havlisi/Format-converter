@@ -4,7 +4,9 @@ Context for picking this project back up without re-deriving everything. Written
 
 ## What this is
 
-Batch converter between PDF, XLSX, DOCX, CSV (Tkinter GUI, `python app.py`). Core logic in
+Batch converter between PDF, XLSX, DOCX, CSV (desktop GUI via pywebview — `python app.py`
+loads `ui/index.html`, a glass/dark-themed page, in a native window; `Api` in `app.py` bridges
+JS calls to the existing `batch.py` logic). Core logic in
 `core/` (one reader/writer module per format), dispatched via `core/dispatch.py`. Repo:
 https://github.com/havlisi/Format-converter (pushed via `git subtree split --prefix=converter`
 from the monorepo at `C:\Users\Isidora\Isis\claude` — that repo mixes in an unrelated project,
