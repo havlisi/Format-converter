@@ -36,6 +36,25 @@ def test_write_text_block_goes_in_column_a(tmp_path):
     assert result == [("table", [["hello"], ["x"]])]
 
 
+def test_write_long_multiline_text_block_splits_into_one_row_per_line(tmp_path):
+    # A raw-text fallback block (the last resort when a PDF can't be reconstructed
+    # into a table) can run to tens of thousands of characters across a long
+    # document. Writing it into a single cell hits Excel's ~32,767-character cell
+    # limit — openpyxl silently truncates on write, with no error — and even
+    # short of that limit, one giant unreadable cell defeats the point of a
+    # spreadsheet. Splitting on newlines into one row per line keeps every line
+    # comfortably under the per-cell cap and makes the content actually readable.
+    lines = [f"line {i} " + ("x" * 40) for i in range(1000)]
+    content = "\n".join(lines)
+    p = tmp_path / "out3.xlsx"
+    blocks = [("text", content)]
+
+    write_xlsx(blocks, str(p))
+    result = read_xlsx(str(p))
+
+    assert result == [("table", [[line] for line in lines])]
+
+
 def test_write_xlsx_does_not_turn_formula_looking_strings_into_formulas(tmp_path):
     p = tmp_path / "formulas.xlsx"
     blocks = [("table", [["=SUM(A1:A2)", "+1+2", "-1-2", "@SUM(A1)", "plain"]])]

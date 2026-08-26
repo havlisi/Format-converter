@@ -1,4 +1,11 @@
-from core.pdf_io import read_pdf, write_pdf, _reconstruct_columned_table
+from core.pdf_io import (
+    read_pdf,
+    write_pdf,
+    _reconstruct_columned_table,
+    _find_header_words,
+    _is_degenerate_table,
+    _PAGE_BREAK,
+)
 import pytest
 
 
@@ -161,3 +168,148 @@ def test_single_amount_column_ignores_amount_embedded_in_description():
     betrag_col = table[0].index("Betrag")
     assert table[1][betrag_col] == "999,00"
     assert table[2][betrag_col] == "500,00"
+
+
+def test_transaction_line_is_not_mistaken_for_the_header_row():
+    # OCR (or a mangled font) can garble the real header's date-label word past
+    # recognition, while an ordinary transaction line coincidentally contains
+    # both keywords — e.g. a "Wert:" value-date annotation and a "Gutschrift"
+    # (credit) description — and, crucially, starts with the row's own real
+    # date. A real column header is never itself a dated transaction line, so
+    # that shape must not be mistaken for one, even when no better candidate
+    # exists — a wrong header corrupts every row bucketed under it.
+    transaction_line = [
+        _word("07.01.2025|Gutschrift", 0, 90, 100),
+        _word("Uberw.", 95, 130, 100),
+        _word("Wert:", 135, 165, 100),
+        _word("06.01.2025", 170, 220, 100),
+    ]
+    lines = [transaction_line]
+
+    assert _find_header_words(lines) is None
+
+
+def test_short_two_word_fragment_is_not_mistaken_for_the_header_row():
+    # A second false-positive shape seen in real OCR output: a wrapped
+    # continuation fragment of a transaction line ("Gutschrift / Wert:
+    # 06.01.2025" — the tail end of a credit description plus its value-date
+    # note) that doesn't start with a date, so the date-anchor guard above
+    # doesn't catch it, but still coincidentally contains both header
+    # keywords. A real column header always has several separately-clustered
+    # column labels (Date, Description, Amount, ...); this fragment clusters
+    # into only two words' worth of groups and must be rejected on that basis.
+    fragment_line = [
+        _word("Gutschrift", 138, 179, 581),
+        _word("/", 213, 215, 581),
+        _word("Wert:", 218, 240, 581),
+        _word("06.01.2025", 243, 290, 581),
+    ]
+    lines = [fragment_line]
+
+    assert _find_header_words(lines) is None
+
+
+def test_both_present_amount_pair_is_not_mistaken_for_a_debit_credit_split():
+    # Real-world shape ("Originalumsatz" / "EUR-Umsatz" on a Sparkasse-style
+    # export): both columns carry a value on every row, restating the same
+    # figure in two forms — but only the first repeats the currency code next
+    # to the number ("2.373,80H EUR"); the second is a bare number with no
+    # adjacent currency ("2.373,80H"). A whole-row currency-tagged amount scan
+    # only ever counts the first, making this look identical to a genuine
+    # debit/credit split (exactly one of two columns populated) even though
+    # both are actually meant to be present on every row — misrouting the bare
+    # second value would silently blank out a real column on every row.
+    header = [
+        _word("Datum", 0, 40, 0),
+        _word("Originalumsatz", 320, 400, 0),
+        _word("EUR-Umsatz", 420, 480, 0),
+    ]
+    row1 = [
+        _word("02.01.2024", 0, 40, 100),
+        _word("2.373,80H", 320, 360, 100),
+        _word("EUR", 365, 385, 100),
+        _word("2.373,80H", 420, 460, 100),
+    ]
+    row2 = [
+        _word("03.01.2024", 0, 40, 120),
+        _word("1.037,80H", 320, 360, 120),
+        _word("EUR", 365, 385, 120),
+        _word("1.037,80H", 420, 460, 120),
+    ]
+    lines = [header, row1, row2]
+
+    table, _preamble = _reconstruct_columned_table(lines)
+
+    assert table, "expected the column reconstruction to succeed"
+    orig_col = table[0].index("Originalumsatz")
+    eur_col = table[0].index("EUR-Umsatz")
+    assert table[1][orig_col] == "2.373,80"
+    assert table[1][eur_col] == "2.373,80"
+    assert table[2][orig_col] == "1.037,80"
+    assert table[2][eur_col] == "1.037,80"
+
+
+def test_table_with_a_near_empty_column_is_degenerate():
+    # pdfplumber's own table detector occasionally imagines a faint grid in
+    # ordinary borderless text (e.g. a page whose wrapped lines happen to align
+    # into two loose "columns") and reports it as a real 2-column table — but a
+    # real document shows its second column populated on barely any row (3-11%,
+    # a coincidental alignment on a stray line or two), never blank on literally
+    # every single one. Treating that as real interrupts a long borderless
+    # statement's continuous reconstruction — flushing whatever was accumulated
+    # so far and restarting from scratch — fragmenting one document into dozens
+    # of disjointed pieces. A genuine multi-column table is populated far more
+    # consistently than that in every column.
+    extracted = [
+        ["20.02.2024", ""],
+        ["154352990-2764324-MOESSNER RG.", ""],
+        ["WM GRUNDSTUECKSVERW. GMBH", ""],
+        ["70558,OP.1294881,202", ""],
+        ["163 2761", "stray"],
+        ["WM GRUNDSTUECKSVERW. GMBH", ""],
+        ["102103727-2769725-IU MOESSER", ""],
+        ["72244,OP.1297288,F124726", ""],
+    ]
+
+    assert _is_degenerate_table(extracted)
+
+
+def test_page_footer_glued_onto_open_row_does_not_override_its_real_date():
+    # Real-world shape (Qonto statements): a repeated page footer restating the
+    # whole statement's own date range ("Vom 01/03/2025 bis zum 31/03/2025")
+    # sits at the bottom of every page, after the last transaction — so it gets
+    # appended to whatever row is still open when the page ends, rather than
+    # recognized as furniture. The row's own date is a slash date with no year
+    # ("28/03"), resolved via the statement's inferred year; the footer's date
+    # is a *full* slash date. A plain date-scan over the row's whole
+    # accumulated text finds the footer's full date first (it's tried before
+    # the no-year fallback) and wrongly reports the statement's start date
+    # instead of the row's own.
+    header = [
+        _word("Datum", 0, 40, 0),
+        _word("Transaktionen", 60, 200, 0),
+        _word("Betrag", 300, 360, 0),
+    ]
+    preamble = [_word("Vom", 0, 20, 5), _word("01/03/2025", 25, 80, 5),
+                _word("bis", 85, 100, 5), _word("zum", 105, 125, 5),
+                _word("31/03/2025", 130, 185, 5)]
+    row1 = [
+        _word("28/03", 0, 30, 100),
+        _word("Payee", 60, 100, 100),
+        _word("999,00", 300, 340, 100),
+    ]
+    footer = [_word("Vom", 0, 20, 200), _word("01/03/2025", 25, 80, 200),
+              _word("bis", 85, 100, 200), _word("zum", 105, 125, 200),
+              _word("31/03/2025", 130, 185, 200)]
+    row2 = [
+        _word("29/03", 0, 30, 300),
+        _word("Other", 60, 100, 300),
+        _word("500,00", 300, 340, 300),
+    ]
+    lines = [preamble, header, row1, footer, _PAGE_BREAK, row2]
+
+    table, _preamble = _reconstruct_columned_table(lines)
+
+    assert table, "expected the column reconstruction to succeed"
+    date_col = table[0].index("Datum")
+    assert table[1][date_col] == "28/03/2025"

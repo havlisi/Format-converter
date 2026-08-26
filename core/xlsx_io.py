@@ -75,8 +75,14 @@ def write_xlsx(blocks: List[Block], path: str) -> None:
     row_idx = 1
     for kind, content in blocks:
         if kind == "text":
-            _set_cell(ws, row_idx, 1, content)
-            row_idx += 1
+            # One row per line, not the whole block in a single cell — a raw-text
+            # fallback block can run to tens of thousands of characters (the last
+            # resort for a PDF that couldn't be reconstructed into a table), and a
+            # single cell silently truncates at Excel's ~32,767-character limit
+            # with no error, quietly dropping the tail of the document.
+            for line in content.split("\n"):
+                _set_cell(ws, row_idx, 1, line)
+                row_idx += 1
         else:
             for row in content:
                 for col_idx, val in enumerate(row, start=1):

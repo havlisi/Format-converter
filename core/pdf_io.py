@@ -121,6 +121,11 @@ _COLUMN_GAP_THRESHOLD = 6.0
 # Key for a row dict's raw, unbucketed physical-line text (see _reconstruct_columned_
 # table). A string, not an int, so it can't collide with a real column index.
 _RAW_LINES_KEY = "_raw"
+# Key for a row's anchor-date fragment as captured at the moment the row started (see
+# _reconstruct_columned_table) — the only point at which it's guaranteed to be the
+# row's own real date, before any later-appended line (e.g. repeated page furniture
+# glued onto a still-open row at the bottom of a page) can contaminate the bucket.
+_ANCHOR_DATE_KEY = "_anchor_date"
 
 # Below this fraction of populated cells, a pdfplumber-detected table is treated as a
 # failed detection (e.g. a borderless statement collapsed into one text-heavy column)
@@ -191,6 +196,21 @@ def _is_degenerate_table(extracted: List[list]) -> bool:
     nonempty = sum(1 for row in extracted for cell in row if cell not in (None, ""))
     if (nonempty / (rows * cols)) < _MIN_POPULATED_RATIO:
         return True
+    # pdfplumber's own table detector occasionally imagines a faint grid in
+    # ordinary borderless text (aligned whitespace read as column rulings) and
+    # reports a "table" whose value all but always lands in one column, leaving
+    # the other(s) populated only on a stray row or two (real statements seen so
+    # far: 3-11% of rows) — a coincidental word alignment, not a real column. A
+    # genuine multi-column table is populated far more consistently than that in
+    # every column. Treating the noise as real interrupts a longer borderless
+    # statement's continuous reconstruction, fragmenting one document into
+    # disjointed pieces.
+    for col_idx in range(cols):
+        col_nonempty = sum(
+            1 for row in extracted if (row[col_idx] if col_idx < len(row) else None) not in (None, "")
+        )
+        if (col_nonempty / rows) < _MIN_POPULATED_RATIO:
+            return True
     # A cell packing 2+ dates or 2+ amounts means pdfplumber merged several distinct
     # transactions into one cell (a subtler failure than a mostly-empty grid) — still
     # unusable for financial data, since every value after the first is silently lost.
@@ -316,7 +336,24 @@ def _looks_like_header(words: List[dict]) -> bool:
     if words is _PAGE_BREAK or len(words) < 3:
         return False
     text = _line_text(words)
-    return bool(_HEADER_DATE_LABEL_RE.search(text) and _HEADER_AMOUNT_LABEL_RE.search(text))
+    if _ROW_START_DATE_RE.match(text):
+        # A real column-header row never starts with a transaction's own date —
+        # a dated line matching the keyword check is a transaction whose own
+        # text happens to contain a header-like word (e.g. a "Wert:" value-date
+        # note, or "Gutschrift" in its description), not the header itself. This
+        # matters most for OCR'd statements, where the real header's date-label
+        # word can be misread past recognition, leaving a transaction line as
+        # the next candidate — mistaking it for the header would corrupt every
+        # row bucketed under it.
+        return False
+    if not _HEADER_DATE_LABEL_RE.search(text) or not _HEADER_AMOUNT_LABEL_RE.search(text):
+        return False
+    # A real column header always names several separate fields (date,
+    # description, amount, ...), which cluster into multiple distinct column
+    # groups. A short transaction-line fragment can still coincidentally carry
+    # both keywords (e.g. a wrapped "Gutschrift / Wert: 06.01.2025" tail) while
+    # clustering into only one or two groups — too thin to be a real header.
+    return len(_cluster_header_columns(words)) >= 3
 
 
 def _find_header_words(lines: List[List[dict]]) -> Optional[List[dict]]:
@@ -439,6 +476,7 @@ def _reconstruct_columned_table(lines: List[List[dict]]) -> Tuple[Optional[List[
                 rows.append(current)
             current = {i: [] for i in range(len(columns))}
             current[_RAW_LINES_KEY] = []
+            current[_ANCHOR_DATE_KEY] = date_frag
         elif current is None:
             if seen_header:
                 preamble_parts.append(line_text)
@@ -456,27 +494,39 @@ def _reconstruct_columned_table(lines: List[List[dict]]) -> Tuple[Optional[List[
         return None, None
 
     amount_col_order = sorted(amount_cols)
+    full_text_parts_by_row = [
+        [" ".join(r.get(i, [])) for i in range(len(columns))] for r in rows
+    ]
+    row_amounts_by_row = [_extract_amounts(" ".join(r.get(_RAW_LINES_KEY, []))) for r in rows]
     # A 2-amount-column layout is either a debit/credit split (e.g. "Belastung"/
     # "Gutschrift" — exactly one of the two is ever populated per row, by design) or
-    # a running-total pair (e.g. "Betrag"/"Saldo" — both should be present on every
-    # row). Which one this document is changes what "valid" means below, and can't
-    # be decided from a single row: a debit/credit split and a running-total row
-    # that failed to capture its second value both look like "1 amount found" in
-    # isolation. Deciding from whether *any* row in the document ever produced 2
-    # tells them apart — a real running-total pair will show 2 somewhere; a genuine
-    # split pair never will.
-    row_amounts_by_row = [_extract_amounts(" ".join(r.get(_RAW_LINES_KEY, []))) for r in rows]
-    is_split_pair = len(amount_col_order) == 2 and max(
-        (len(a) for a in row_amounts_by_row), default=0
-    ) <= 1
+    # a both-always-present pair (a running total like "Betrag"/"Saldo", or a
+    # repeated figure like "Originalumsatz"/"EUR-Umsatz" restating the same amount
+    # in two forms). Which one this document is changes what "valid" means below.
+    #
+    # Decided from each column's own bucketed text, not the whole-row amount scan
+    # (row_amounts_by_row) — that scan only counts a value when a currency code
+    # sits directly next to it, so a column whose value is a bare number with no
+    # adjacent currency (common for a second column that repeats the first without
+    # re-stating it) would never be counted there, making a genuine both-present
+    # pair look identical to "at most 1 found" — exactly what a real split pair
+    # also looks like. A column's own bucket has no such blind spot: a real split
+    # pair never has both columns' own bucket populated on the same row; a
+    # both-present pair does, on virtually every row.
+    own_bucket_amounts_by_row = [
+        [_parse_first_bare_amount(full_text_parts[col_i]) for col_i in amount_col_order]
+        for full_text_parts in full_text_parts_by_row
+    ]
+    is_split_pair = len(amount_col_order) == 2 and not any(
+        all(vals) for vals in own_bucket_amounts_by_row
+    )
 
     row_outputs = []
     any_iban = False
     valid_amounts = 0
     valid_dates = 0
     total_amount_rows = len(rows) if amount_col_order else 0
-    for r, row_amounts in zip(rows, row_amounts_by_row):
-        full_text_parts = [" ".join(r.get(i, [])) for i in range(len(columns))]
+    for r, full_text_parts, row_amounts in zip(rows, full_text_parts_by_row, row_amounts_by_row):
         amount_values = {col_i: "" for col_i in amount_col_order}
         if is_split_pair and len(row_amounts) == 1:
             # Route the one value found by its own sign — the universal convention
@@ -535,7 +585,17 @@ def _reconstruct_columned_table(lines: List[List[dict]]) -> Tuple[Optional[List[
         row_out = []
         for i in range(len(columns)):
             if i in date_cols:
-                value = _normalize_date(full_text_parts[i], inferred_year)
+                if i == anchor_date_col:
+                    # The anchor fragment captured when this row started, not the
+                    # bucket's full accumulated text — a later line glued onto a
+                    # still-open row (e.g. a repeated page footer restating the
+                    # statement's own date range, at the bottom of every page)
+                    # can plant a full, dated match ahead of it in the fallback
+                    # chain below, and _normalize_date has no way to tell that
+                    # apart from the row's own real date.
+                    value = _normalize_date(r.get(_ANCHOR_DATE_KEY, full_text_parts[i]), inferred_year)
+                else:
+                    value = _normalize_date(full_text_parts[i], inferred_year)
                 if i == anchor_date_col and _DATE_VALID_RE.fullmatch(value):
                     valid_dates += 1
                 row_out.append(value)
