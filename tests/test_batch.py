@@ -31,8 +31,11 @@ def test_run_batch_converts_and_reports_output(tmp_path):
 
     run_batch([str(p)], "xlsx", lambda path, status: updates.append((path, status)))
 
-    assert len(updates) == 1
-    path, status = updates[0]
+    # A "converting…" status fires first, so the UI can show progress before a
+    # slow conversion finishes, followed by the final result.
+    assert len(updates) == 2
+    assert updates[0] == (str(p), "converting…")
+    path, status = updates[1]
     assert path == str(p)
     assert status.startswith("done -> ")
     assert status.endswith(".xlsx")
@@ -49,9 +52,11 @@ def test_run_batch_reports_error_without_stopping(tmp_path):
     missing = str(tmp_path / "missing.pdf")
     run_batch([missing, str(good)], "xlsx", lambda path, status: updates.append((path, status)))
 
-    assert updates[0][0] == missing
-    assert updates[0][1].startswith("error: ")
-    assert updates[1][1].startswith("done -> ")
+    assert updates[0] == (missing, "converting…")
+    assert updates[1][0] == missing
+    assert updates[1][1].startswith("error: ")
+    assert updates[2] == (str(good), "converting…")
+    assert updates[3][1].startswith("done -> ")
 
 
 def test_find_collisions_detects_shared_basename(tmp_path):
@@ -99,7 +104,8 @@ def test_find_collisions_real_world_overwrite_reproduces_without_check(tmp_path)
     # Without the guard, running the batch anyway proves the collision is real:
     updates = []
     run_batch([str(csv_path), str(xlsx_path)], "docx", lambda p, s: updates.append((p, s)))
-    assert all(status.startswith("done ->") for _, status in updates)
+    final_statuses = [status for _, status in updates if status != "converting…"]
+    assert all(status.startswith("done ->") for status in final_statuses)
 
     from core.docx_io import read_docx
     final = read_docx(str(tmp_path / "data.docx"))

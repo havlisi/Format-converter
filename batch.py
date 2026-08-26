@@ -38,6 +38,7 @@ def run_batch(file_paths: List[str], target_ext: str, on_row_update: Callable[[s
         if ext_of(path) == target_ext:
             on_row_update(path, f"skipped (already {target_ext})")
             continue
+        on_row_update(path, "converting…")
         try:
             out_path = convert(path, target_ext)
             on_row_update(path, f"done -> {out_path}")
