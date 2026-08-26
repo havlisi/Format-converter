@@ -487,21 +487,37 @@ def _reconstruct_columned_table(lines: List[List[dict]]) -> Tuple[Optional[List[
             target_col = amount_col_order[0] if amt.startswith("-") else amount_col_order[1]
             amount_values[target_col] = amt
         else:
-            # Amount columns are often right-aligned in the source, so a value's left
-            # edge can drift into the *previous* column's x-range — bucketing alone
-            # misplaces it. Assigning the row's amounts (found in original reading
-            # order, not column-reordered order — see row_amounts_by_row above)
-            # positionally to the amount columns in header order sidesteps that; a
-            # column whose own text had no currency marker next to it (e.g. a
-            # repeated total with no "EUR" of its own) falls back to reading its own
-            # bucket directly.
-            ai = 0
+            # Each amount column's own x-bucketed text is authoritative when it has
+            # a value — it's already confined to the right column by position, so
+            # it's correct even when another column (typically a free-text
+            # description) happens to contain its own currency-tagged number
+            # earlier in reading order (e.g. a reference amount cited in a
+            # "Verwendungszweck" narrative, sitting left of the real "Betrag").
+            # Reading the row's whole-text amount scan instead, unconditionally,
+            # would pick that narrative number over the real one.
+            #
+            # Amount columns are sometimes right-aligned in the source, though, so a
+            # value's left edge can drift into the *previous* column's x-range and
+            # leave its own bucket empty — only then fall back to the row's
+            # whole-text amount scan (in original reading order), taking the next
+            # value not already claimed by another column's own bucket.
+            claimed = set()
+            unresolved = []
             for col_i in amount_col_order:
+                own = _parse_first_bare_amount(full_text_parts[col_i])
+                if own:
+                    amount_values[col_i] = own
+                    claimed.add(own)
+                else:
+                    unresolved.append(col_i)
+            ai = 0
+            for col_i in unresolved:
+                while ai < len(row_amounts) and row_amounts[ai] in claimed:
+                    ai += 1
                 if ai < len(row_amounts):
                     amount_values[col_i] = row_amounts[ai]
+                    claimed.add(row_amounts[ai])
                     ai += 1
-                else:
-                    amount_values[col_i] = _parse_first_bare_amount(full_text_parts[col_i])
 
         if is_split_pair:
             # By design only one column is ever expected to be populated — the row
