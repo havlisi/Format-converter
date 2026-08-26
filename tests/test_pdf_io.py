@@ -275,6 +275,29 @@ def test_table_with_a_near_empty_column_is_degenerate():
     assert _is_degenerate_table(extracted)
 
 
+def test_real_table_with_a_couple_sparse_optional_columns_is_not_degenerate():
+    # Real-world shape (an Aareal Bank grid-bordered statement): a genuine,
+    # fully-headed 11-column table — Buchung/Wertstellung/Buchungstext/
+    # Beguenstigter/Verwendungszweck/Betrag/Waehrung/Auszugsnr./Anhang/
+    # Kommentar/Laufender Saldo — where "Anhang" (attachment) and "Kommentar"
+    # (remarks) are legitimately optional and populated on only one row out
+    # of nine. Rejecting on any one sparse column threw this out entirely
+    # (nine consistently-populated columns and all), forcing a fallback that
+    # merged the whole row into one blob. A minority of sparse columns among
+    # many full ones is a real table, not noise — only a majority sparse
+    # (the noise shape above: a single sparse column out of just two) means
+    # the "table" isn't real.
+    header = ["Buchung", "Wertstellung", "Buchungstext", "Empfaenger", "Zweck",
+              "Betrag", "Waehrung", "Auszugsnr.", "Anhang", "Kommentar", "Saldo"]
+    extracted = [header] + [
+        ["1/2/2026", "1/2/2026", "Ueberweisung", "Katarzyna Bassa", "Erste Rate",
+         "190.00 H", "EUR", "00001", "" if i else "note", "", "818,996.21 H"]
+        for i in range(8)
+    ]
+
+    assert not _is_degenerate_table(extracted)
+
+
 def test_page_footer_glued_onto_open_row_does_not_override_its_real_date():
     # Real-world shape (Qonto statements): a repeated page footer restating the
     # whole statement's own date range ("Vom 01/03/2025 bis zum 31/03/2025")

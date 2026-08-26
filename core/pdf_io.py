@@ -208,17 +208,28 @@ def _is_degenerate_table(extracted: List[list]) -> bool:
     # ordinary borderless text (aligned whitespace read as column rulings) and
     # reports a "table" whose value all but always lands in one column, leaving
     # the other(s) populated only on a stray row or two (real statements seen so
-    # far: 3-11% of rows) — a coincidental word alignment, not a real column. A
-    # genuine multi-column table is populated far more consistently than that in
-    # every column. Treating the noise as real interrupts a longer borderless
-    # statement's continuous reconstruction, fragmenting one document into
-    # disjointed pieces.
+    # far: 3-11% of rows) — a coincidental word alignment, not a real column.
+    # Treating the noise as real interrupts a longer borderless statement's
+    # continuous reconstruction, fragmenting one document into disjointed pieces.
+    #
+    # Judged by a MAJORITY of columns being that sparse, not any single one — a
+    # real, well-formed table (a genuine header naming every column) can still
+    # have one or two legitimately optional fields nobody filled in (an
+    # "Anhang"/attachment or "Kommentar"/remarks column, populated on a real
+    # statement's real rows only 1 time in 9) sitting right alongside many
+    # consistently-populated columns. The noise tables this guards against were
+    # never more than two columns to begin with, with exactly one of those
+    # sparse — a real multi-column table with a couple of sparse fields among
+    # many full ones is a different, legitimate shape.
+    sparse_cols = 0
     for col_idx in range(cols):
         col_nonempty = sum(
             1 for row in extracted if (row[col_idx] if col_idx < len(row) else None) not in (None, "")
         )
         if (col_nonempty / rows) < _MIN_POPULATED_RATIO:
-            return True
+            sparse_cols += 1
+    if sparse_cols * 2 >= cols:
+        return True
     # A cell packing 2+ dates or 2+ amounts means pdfplumber merged several distinct
     # transactions into one cell (a subtler failure than a mostly-empty grid) — still
     # unusable for financial data, since every value after the first is silently lost.
