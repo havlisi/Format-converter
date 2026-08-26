@@ -437,6 +437,10 @@ def _reconstruct_columned_table(lines: List[List[dict]]) -> Tuple[Optional[List[
     # boilerplate from being folded into whatever transaction happens to be open when
     # a new page starts.
     preamble_line_set: set = set()
+    # Lines seen after the header but before the first row has started, that
+    # themselves carry no amount — held here rather than assumed to be document
+    # preamble (see the `current is None` branch below for why).
+    pending_orphan_lines: List[Tuple[str, List[List[str]]]] = []
     rows: List[dict] = []
     current: Optional[dict] = None
     seen_header = False
@@ -467,6 +471,30 @@ def _reconstruct_columned_table(lines: List[List[dict]]) -> Tuple[Optional[List[
         date_frag = " ".join(buckets[anchor_date_col]).strip()
         is_new_row = bool(_ROW_START_DATE_RE.match(date_frag))
 
+        if is_new_row and buckets[anchor_date_col]:
+            # Some exports glue the row's date straight onto the first word of
+            # its own description with no space ("29.12.2023Entgeltabrechnung")
+            # — one pdfplumber token, bucketed whole into the date column since
+            # that's where it starts. _normalize_date only ever pulls the date
+            # portion back out for the date column's own value, so the glued
+            # word would otherwise vanish rather than reach the description
+            # column with the rest of that line's words.
+            first_word = buckets[anchor_date_col][0]
+            glue_match = _ROW_START_DATE_RE.match(first_word)
+            if glue_match and glue_match.end() < len(first_word):
+                glued_tail = first_word[glue_match.end():]
+                buckets[anchor_date_col][0] = first_word[: glue_match.end()]
+                target_col = next(
+                    (
+                        i
+                        for i in range(anchor_date_col + 1, len(columns))
+                        if i not in date_cols and i not in amount_cols
+                    ),
+                    anchor_date_col + 1 if anchor_date_col + 1 < len(columns) else None,
+                )
+                if target_col is not None:
+                    buckets[target_col].insert(0, glued_tail)
+
         if after_page_break and not is_new_row:
             continue
         after_page_break = False
@@ -477,10 +505,39 @@ def _reconstruct_columned_table(lines: List[List[dict]]) -> Tuple[Optional[List[
             current = {i: [] for i in range(len(columns))}
             current[_RAW_LINES_KEY] = []
             current[_ANCHOR_DATE_KEY] = date_frag
+            if pending_orphan_lines:
+                # A row's own tallest cell (e.g. a multi-line description) can
+                # render starting above the row's date/amount baseline — its
+                # first line then sorts ahead of the row-start line by vertical
+                # position, arriving here before any row exists yet. Since it
+                # carries no amount of its own, it isn't a real standalone
+                # summary/total line (those always show one) — it belongs to
+                # the row that's just starting, not to the document preamble.
+                for orphan_text, orphan_buckets in pending_orphan_lines:
+                    current[_RAW_LINES_KEY].append(orphan_text)
+                    for i, bucket in enumerate(orphan_buckets):
+                        if bucket:
+                            current[i].append(" ".join(bucket))
+                pending_orphan_lines = []
         elif current is None:
             if seen_header:
-                preamble_parts.append(line_text)
-                preamble_line_set.add(line_text)
+                # A real standalone summary/total line (an opening balance, a
+                # running total) always carries an amount *in its own amount-
+                # column bucket* — checked there directly, bare-number-tolerant,
+                # rather than via a currency-tagged scan of the whole line: a
+                # per-row amount often has no currency code of its own (the
+                # column header already states it once), so a currency-tagged
+                # scan alone would miss it and wrongly treat a real balance
+                # line as safe to merge into the next row, corrupting its
+                # amount with the balance's instead.
+                has_own_amount = any(
+                    _parse_first_bare_amount(" ".join(buckets[col_i])) for col_i in amount_cols
+                )
+                if has_own_amount:
+                    preamble_parts.append(line_text)
+                    preamble_line_set.add(line_text)
+                else:
+                    pending_orphan_lines.append((line_text, buckets))
             continue
 
         current[_RAW_LINES_KEY].append(line_text)

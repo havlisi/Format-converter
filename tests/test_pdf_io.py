@@ -313,3 +313,121 @@ def test_page_footer_glued_onto_open_row_does_not_override_its_real_date():
     assert table, "expected the column reconstruction to succeed"
     date_col = table[0].index("Datum")
     assert table[1][date_col] == "28/03/2025"
+
+
+def test_date_glued_directly_onto_the_next_words_description_is_not_lost():
+    # Real-world shape (a Sparkasse statement): some exports glue the row's
+    # date straight onto the first word of its own description with no space
+    # ("29.12.2023Entgeltabrechnung") — a single pdfplumber token. Bucketing
+    # by x-position puts that whole token in the date column since it starts
+    # there, and _normalize_date only pulls the date portion back out for the
+    # date column's own value — the glued description word was never routed
+    # anywhere else, silently vanishing from the row instead of landing in
+    # the description column with the rest of that line's words.
+    header = [
+        _word("Datum", 0, 40, 0),
+        _word("Erlaeuterung", 60, 200, 0),
+        _word("Betrag", 300, 360, 0),
+    ]
+    row1 = [
+        _word("29.12.2023Entgeltabrechnung", 0, 100, 100),
+        _word("/", 105, 110, 100),
+        _word("Wert:", 115, 140, 100),
+        _word("30.12.2023", 145, 195, 100),
+        _word("-9,50", 300, 340, 100),
+    ]
+    row2 = [
+        _word("30.12.2023", 0, 40, 120),
+        _word("Rechnung", 60, 100, 120),
+        _word("-3,00", 300, 340, 120),
+    ]
+    lines = [header, row1, row2]
+
+    table, _preamble = _reconstruct_columned_table(lines)
+
+    assert table, "expected the column reconstruction to succeed"
+    date_col = table[0].index("Datum")
+    desc_col = table[0].index("Erlaeuterung")
+    assert table[1][date_col] == "29.12.2023"
+    assert "Entgeltabrechnung" in table[1][desc_col]
+
+
+def test_first_rows_own_tall_cell_starting_above_its_date_is_not_dropped():
+    # Real-world shape (a bordered-grid statement whose first transaction has a
+    # multi-line description): the description cell renders starting a little
+    # above the row's own date/amount baseline, so its first physical line
+    # sorts ahead of the row-start line by vertical position and is seen here
+    # before any row has started yet ("current is None"). Since it carries no
+    # amount of its own, it isn't a standalone summary/total line (those
+    # always show one) — it's the first row's own leading content and must
+    # land in that row, not be discarded as document preamble.
+    header = [
+        _word("Datum", 0, 40, 0),
+        _word("Verwendungszweck", 60, 300, 0),
+        _word("Betrag", 400, 460, 0),
+    ]
+    orphan_first_line = [_word("ERSTATT.027/062/01218", 60, 200, 90)]
+    row1 = [
+        _word("15.07.2026", 0, 60, 100),
+        _word("GEW.ST", 60, 100, 100),
+        _word("2023", 105, 130, 100),
+        _word("96.948,85", 400, 450, 100),
+    ]
+    row2 = [
+        _word("16.07.2026", 0, 60, 120),
+        _word("Sonstiges", 60, 120, 120),
+        _word("12,00", 400, 450, 120),
+    ]
+    lines = [header, orphan_first_line, row1, row2]
+
+    table, preamble = _reconstruct_columned_table(lines)
+
+    assert table, "expected the column reconstruction to succeed"
+    desc_col = table[0].index("Verwendungszweck")
+    assert "ERSTATT.027/062/01218" in table[1][desc_col]
+    assert not preamble
+
+
+def test_opening_balance_line_before_first_row_is_not_merged_into_it():
+    # A real standalone summary line ("Kontostand am 30.11.2023, Auszug Nr.
+    # 11    10.518,94") sits between the header and the first transaction, and
+    # — unlike the orphan-content case above — genuinely does not belong to
+    # that first row. Its amount has no currency code of its own (the column
+    # header already states "Betrag EUR" once), so a currency-tagged scan of
+    # the line wrongly sees "no amount" and would let it be merged into row 1
+    # — corrupting row 1's own real amount with the balance figure instead.
+    # The amount check must find it directly in its own amount-column bucket.
+    header = [
+        _word("Datum", 0, 40, 0),
+        _word("Erlaeuterung", 60, 200, 0),
+        _word("Betrag", 300, 360, 0),
+    ]
+    balance_line = [
+        _word("Kontostand", 60, 120, 90),
+        _word("am", 125, 140, 90),
+        _word("30.11.2023,", 145, 200, 90),
+        _word("Auszug", 205, 240, 90),
+        _word("Nr.", 245, 260, 90),
+        _word("11", 265, 280, 90),
+        _word("10.518,94", 300, 350, 90),
+    ]
+    row1 = [
+        _word("05.12.2023", 0, 60, 100),
+        _word("Dauerauftrag", 60, 130, 100),
+        _word("-500,00", 300, 350, 100),
+    ]
+    row2 = [
+        _word("12.12.2023", 0, 60, 120),
+        _word("Gutschrift", 60, 120, 120),
+        _word("693,00", 300, 350, 120),
+    ]
+    lines = [header, balance_line, row1, row2]
+
+    table, preamble = _reconstruct_columned_table(lines)
+
+    assert table, "expected the column reconstruction to succeed"
+    betrag_col = table[0].index("Betrag")
+    desc_col = table[0].index("Erlaeuterung")
+    assert table[1][betrag_col] == "-500,00"
+    assert "Kontostand" not in table[1][desc_col]
+    assert preamble and "Kontostand" in preamble
