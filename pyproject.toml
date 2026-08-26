@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "format-converter"
+version = "0.1.0"
+description = "Document format conversion core (PDF/XLSX/DOCX/CSV) extracted from havlisi/Format-converter."
+requires-python = ">=3.9"
+dependencies = [
+    "pdfplumber",
+    "reportlab",
+    "openpyxl",
+    "python-docx",
+    "pytesseract",
+]
+
+[tool.setuptools]
+packages = ["core"]
