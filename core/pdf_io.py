@@ -102,6 +102,17 @@ _ROW_START_DATE_DOT_RE = r"\d{1,2}\.\d{1,2}\.(?:\d{4}(?!\s*\d{1,2}:\d{2})|(?!\d{
 # longer looks like a time, then matching anyway.
 _ROW_START_DATE_SLASH_RE = r"\d{1,2}/\d{1,2}(?:/\d{2,4}(?!\d)(?!\s*\d{1,2}:\d{2})|(?!/\d))"
 _ROW_START_DATE_RE = re.compile(rf"^(?:{_ROW_START_DATE_DOT_RE}|{_ROW_START_DATE_SLASH_RE})")
+# A page's own printed "current/total" indicator ("1/3" — page 1 of 3) is a bare
+# slash pattern that reads identically to a valid day/month partial date (day=1,
+# month=3), so it slips past the row-start regex above. What tells the two apart
+# is content, not shape: a real transaction line is never *just* its own date with
+# nothing else on the same physical line — there's always at least a payee or
+# description word, even a garbled OCR one. A page-number indicator legitimately
+# is exactly that alone (seen scattered onto its own OCR line on real scanned
+# statements), so it's recognized and skipped as page furniture before row-start
+# detection ever sees it, rather than spawning a bogus row that corrupts a real
+# statement's date-accuracy ratio for the whole page.
+_BARE_PAGE_NUMBER_RE = re.compile(r"^\d{1,2}/\d{1,3}$")
 # A slash date with its year present, vs. without — the latter needs a year inferred
 # from elsewhere in the document (see _infer_year).
 _SLASH_DATE_FULL_RE = re.compile(r"\b(\d{1,2})/(\d{1,2})/(\d{2,4})\b")
@@ -375,13 +386,41 @@ def _looks_like_header(words: List[dict]) -> bool:
     return len(_cluster_header_columns(words)) >= 3
 
 
-def _find_header_words(lines: List[List[dict]]) -> Optional[List[dict]]:
+def _looks_like_amount_only_header(words: List[dict]) -> bool:
+    """Same shape as _looks_like_header, but without requiring the date-label
+    keyword — a fallback for OCR'd statements where the header's own "Datum"
+    (or similar) is legible in the source image but Tesseract's whole-page
+    layout analysis drops it anyway, even though every transaction row's own
+    date value nearby OCRs correctly (confirmed against a real statement: the
+    isolated word reads perfectly on its own, and neither a higher DPI, an
+    alternate page-segmentation mode, nor removing surrounding page content
+    recovers it in a full-page pass — a genuine miss, not a misread to fuzzy-
+    match against). The caller is expected to confirm the assumed date column
+    actually holds real dates before trusting this — see anchor_date_col in
+    _reconstruct_columned_table."""
+    if words is _PAGE_BREAK or len(words) < 3:
+        return False
+    text = _line_text(words)
+    if _ROW_START_DATE_RE.match(text):
+        return False
+    if not _HEADER_AMOUNT_LABEL_RE.search(text):
+        return False
+    return len(_cluster_header_columns(words)) >= 3
+
+
+def _find_header_words(lines: List[List[dict]]) -> Tuple[Optional[List[dict]], bool]:
     """The document's own column-header row: the physical line naming both a
-    date-like and an amount-like field (e.g. "Datum ... Betrag ...")."""
+    date-like and an amount-like field (e.g. "Datum ... Betrag ..."). Returns
+    (header_words, date_label_found) — date_label_found is False only for the
+    amount-only fallback, telling the caller its assumed date column still
+    needs confirming against the data itself."""
     for words in lines:
         if _looks_like_header(words):
-            return words
-    return None
+            return words, True
+    for words in lines:
+        if _looks_like_amount_only_header(words):
+            return words, False
+    return None, False
 
 
 _COLUMN_BOUNDARY_MARGIN = 6.0
@@ -421,7 +460,7 @@ def _reconstruct_columned_table(lines: List[List[dict]]) -> Tuple[Optional[List[
     no recognizable date column, or fewer than two rows resulted — the caller then falls
     back to the plainer anchor-based reconstruction.
     """
-    header_words = _find_header_words(lines)
+    header_words, date_label_found = _find_header_words(lines)
     if not header_words:
         return None, None
 
@@ -430,7 +469,18 @@ def _reconstruct_columned_table(lines: List[List[dict]]) -> Tuple[Optional[List[
     column_boundaries = _column_boundaries([start for _, start in columns])
     date_cols = {i for i, l in enumerate(labels) if _HEADER_DATE_LABEL_RE.search(l)}
     if not date_cols:
-        return None, None
+        if not date_label_found:
+            # The amount-only fallback header has no date-label column to find
+            # by keyword at all (that's the whole point of it) — assume the
+            # first column is the date column, the near-universal convention
+            # on every real statement seen so far. Unconfirmed until the
+            # sanity gate below checks that column's own data actually parses
+            # as real dates on most rows; if this document doesn't fit that
+            # assumption, that gate rejects the table and the caller falls
+            # back to the plainer reconstruction, same as any other bad fit.
+            date_cols = {0}
+        else:
+            return None, None
     anchor_date_col = min(date_cols)
     amount_cols = {i for i, l in enumerate(labels) if _HEADER_AMOUNT_LABEL_RE.search(l)}
     # A column whose clustered label matches BOTH a date and an amount keyword
@@ -494,6 +544,8 @@ def _reconstruct_columned_table(lines: List[List[dict]]) -> Tuple[Optional[List[
             continue
         line_text = _line_text(words)
         if line_text in preamble_line_set:
+            continue
+        if len(words) == 1 and _BARE_PAGE_NUMBER_RE.match(line_text):
             continue
 
         buckets: List[List[str]] = [[] for _ in columns]

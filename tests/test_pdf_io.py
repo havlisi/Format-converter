@@ -187,7 +187,8 @@ def test_transaction_line_is_not_mistaken_for_the_header_row():
     ]
     lines = [transaction_line]
 
-    assert _find_header_words(lines) is None
+    header_words, _date_label_found = _find_header_words(lines)
+    assert header_words is None
 
 
 def test_short_two_word_fragment_is_not_mistaken_for_the_header_row():
@@ -207,7 +208,8 @@ def test_short_two_word_fragment_is_not_mistaken_for_the_header_row():
     ]
     lines = [fragment_line]
 
-    assert _find_header_words(lines) is None
+    header_words, _date_label_found = _find_header_words(lines)
+    assert header_words is None
 
 
 def test_both_present_amount_pair_is_not_mistaken_for_a_debit_credit_split():
@@ -514,3 +516,67 @@ def test_slash_date_row_start_excludes_a_page_footer_timestamp():
     # this must not become a trailing anchor that rejects ordinary rows.
     assert _ROW_START_DATE_RE.match("5/5/2026 Ueberweisung PropCo Spring")
     assert _ROW_START_DATE_RE.match("11/03Nobelstr. 50-55")
+
+
+def test_ocr_missing_only_the_date_label_still_finds_the_header():
+    # Real-world shape (a scanned Kreissparkasse statement, OCR'd): "Datum" is
+    # perfectly legible in the source image, but Tesseract's whole-page layout
+    # analysis drops it anyway — confirmed against the real file that neither
+    # a higher DPI, an alternate page-segmentation mode, nor removing nearby
+    # page content recovers it in a full-page pass, while every transaction
+    # row's own date value nearby (and the word in isolation) OCRs correctly.
+    # The header row still has "Erlaeuterung"/"Betrag Soll"/"Betrag Haben" —
+    # enough to recognize it as a header and assume its first column is the
+    # date column, the near-universal layout on every real statement seen.
+    header = [
+        _word("Erlaeuterung", 138, 250, 0),
+        _word("Betrag", 392, 420, 0),
+        _word("Soll", 422, 438, 0),
+        _word("Betrag", 479, 507, 0),
+        _word("Haben", 510, 536, 0),
+    ]
+    row1 = [
+        _word("02.01.2025", 0, 60, 100),
+        _word("Lastschrift", 138, 200, 100),
+        _word("-0,02", 392, 430, 100),
+    ]
+    row2 = [
+        _word("02.01.2025", 0, 60, 120),
+        _word("Gutschrift", 138, 200, 120),
+        _word("2.139,42", 479, 520, 120),
+    ]
+    lines = [header, row1, row2]
+
+    table, _preamble = _reconstruct_columned_table(lines)
+
+    assert table, "expected the amount-only header fallback to find a table"
+    assert table[1][0] == "02.01.2025"
+    assert table[2][0] == "02.01.2025"
+
+
+def test_amount_only_header_fallback_is_rejected_when_first_column_is_not_dates():
+    # Safety net for the fallback above: if the assumption that column 0 is
+    # the date column doesn't hold, row-start detection (which requires the
+    # anchor column's own bucket to look like a real date) never fires for
+    # any line, so no row is ever recognized — falling back to the plainer
+    # reconstruction, same as any other document that doesn't fit the model.
+    header = [
+        _word("Empfaenger", 0, 60, 0),
+        _word("Erlaeuterung", 138, 250, 0),
+        _word("Betrag", 392, 420, 0),
+    ]
+    row1 = [
+        _word("Firma A", 0, 60, 100),
+        _word("Lastschrift", 138, 200, 100),
+        _word("-0,02", 392, 430, 100),
+    ]
+    row2 = [
+        _word("Firma B", 0, 60, 120),
+        _word("Gutschrift", 138, 200, 120),
+        _word("2.139,42", 392, 430, 120),
+    ]
+    lines = [header, row1, row2]
+
+    table, _preamble = _reconstruct_columned_table(lines)
+
+    assert table is None
