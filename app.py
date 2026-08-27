@@ -1,8 +1,21 @@
 # converter/app.py
 import json
 import os
+import sys
 
 import webview
+
+# Windows' WinForms accessibility bridge (used internally by pywebview's WebView2
+# host) can walk a genuinely deep — not actually infinite — parent-accessible-
+# object chain right after the window is created, before the WebView2 control has
+# finished laying itself out (each unresolved level reports Bounds.Empty and
+# defers to its parent). Python's default 1000-frame recursion limit cuts that
+# walk off mid-call, which leaves the COM callback that triggered it in a broken
+# state and hangs the window instead of erroring cleanly. Raised well past the
+# depth actually seen (hundreds of ".Empty" levels) so the walk can finish on its
+# own; this only affects Python's own call-stack guard, not any real Windows
+# limit, and the window still starts fast either way.
+sys.setrecursionlimit(20000)
 
 from batch import scan_folder, run_batch, find_collisions
 from core.dispatch import SUPPORTED_EXTS, ext_of, output_path_for
