@@ -1,21 +1,8 @@
 # converter/app.py
 import json
 import os
-import sys
 
 import webview
-
-# Windows' WinForms accessibility bridge (used internally by pywebview's WebView2
-# host) can walk a genuinely deep — not actually infinite — parent-accessible-
-# object chain right after the window is created, before the WebView2 control has
-# finished laying itself out (each unresolved level reports Bounds.Empty and
-# defers to its parent). Python's default 1000-frame recursion limit cuts that
-# walk off mid-call, which leaves the COM callback that triggered it in a broken
-# state and hangs the window instead of erroring cleanly. Raised well past the
-# depth actually seen (hundreds of ".Empty" levels) so the walk can finish on its
-# own; this only affects Python's own call-stack guard, not any real Windows
-# limit, and the window still starts fast either way.
-sys.setrecursionlimit(20000)
 
 from batch import scan_folder, run_batch, find_collisions
 from core.dispatch import SUPPORTED_EXTS, ext_of, output_path_for
@@ -30,14 +17,23 @@ class Api:
     Tkinter app, just called from JS instead of a Tk callback."""
 
     def __init__(self):
-        self.window = None  # set once the window exists, see main()
+        # Underscore-prefixed: pywebview builds the JS-callable API by walking
+        # every *public* attribute on this object with dir()/getattr(), recursing
+        # into anything non-callable — a plain `self.window` would have it walk
+        # straight into the native WinForms window object, and from there into
+        # raw .NET COM properties (window.native.AccessibilityObject.Bounds...),
+        # which cycles back on itself indefinitely (Rectangle.Empty exposes its
+        # own .Empty, forever) and hangs the window before it ever opens.
+        # pywebview explicitly skips underscore-prefixed names during that walk,
+        # so this is the actual fix, not a workaround.
+        self._window = None  # set once the window exists, see main()
 
     def add_files(self):
-        result = self.window.create_file_dialog(webview.OPEN_DIALOG, allow_multiple=True, file_types=(FILE_TYPE_FILTER,))
+        result = self._window.create_file_dialog(webview.OPEN_DIALOG, allow_multiple=True, file_types=(FILE_TYPE_FILTER,))
         return list(result) if result else []
 
     def add_folder(self):
-        result = self.window.create_file_dialog(webview.FOLDER_DIALOG)
+        result = self._window.create_file_dialog(webview.FOLDER_DIALOG)
         if not result:
             return []
         return scan_folder(result[0])
@@ -70,7 +66,7 @@ class Api:
 
     def run_conversion(self, paths, target_ext):
         def on_update(path, status):
-            self.window.evaluate_js(f"setStatus({json.dumps(path)}, {json.dumps(status)})")
+            self._window.evaluate_js(f"setStatus({json.dumps(path)}, {json.dumps(status)})")
 
         run_batch(paths, target_ext, on_update)
 
@@ -81,7 +77,7 @@ def main():
         "Format Converter", UI_PATH, js_api=api, width=780, height=560, min_size=(580, 400),
         background_color="#14101f",
     )
-    api.window = window
+    api._window = window
     webview.start()
 
 
