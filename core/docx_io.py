@@ -39,11 +39,32 @@ def write_docx(blocks: List[Block], path: str) -> None:
     doc.save(path)
 
 
+def _pdf_has_text_layer(pdf_path: str) -> bool:
+    """True if any page yields extractable words. A scanned/image-only PDF
+    returns False and is routed through OCR instead of pdf2docx."""
+    import pdfplumber
+
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages:
+            if page.extract_words():
+                return True
+    return False
+
+
 def pdf_to_docx(pdf_path: str, docx_path: str) -> None:
-    """Convert a PDF to DOCX preserving page layout (fonts, positions, tables,
-    images) via pdf2docx. A scanned PDF with no text layer has no layout to
-    preserve — that case is handled by the caller-facing wrapper in Task 2."""
+    """Convert a PDF to DOCX preserving page layout via pdf2docx. A scanned PDF
+    with no text layer has no layout to preserve — route it through the existing
+    OCR block pipeline so the DOCX at least carries searchable text."""
+    if not _pdf_has_text_layer(pdf_path):
+        from core import pdf_io
+        write_docx(pdf_io.read_pdf(pdf_path), docx_path)
+        return
+
+    import logging
+
     from pdf2docx import Converter
+
+    logging.getLogger("pdf2docx").setLevel(logging.WARNING)
 
     cv = Converter(pdf_path)
     try:
