@@ -164,7 +164,7 @@ def test_single_amount_column_ignores_amount_embedded_in_description():
     ]
     lines = [header, row1, row2]
 
-    table, _preamble = _reconstruct_columned_table(lines)
+    table, _preamble, _extra = _reconstruct_columned_table(lines)
 
     assert table, "expected the column reconstruction to succeed"
     betrag_col = table[0].index("Betrag")
@@ -242,7 +242,7 @@ def test_both_present_amount_pair_is_not_mistaken_for_a_debit_credit_split():
     ]
     lines = [header, row1, row2]
 
-    table, _preamble = _reconstruct_columned_table(lines)
+    table, _preamble, _extra = _reconstruct_columned_table(lines)
 
     assert table, "expected the column reconstruction to succeed"
     orig_col = table[0].index("Originalumsatz")
@@ -335,7 +335,7 @@ def test_page_footer_glued_onto_open_row_does_not_override_its_real_date():
     ]
     lines = [preamble, header, row1, footer, _PAGE_BREAK, row2]
 
-    table, _preamble = _reconstruct_columned_table(lines)
+    table, _preamble, _extra = _reconstruct_columned_table(lines)
 
     assert table, "expected the column reconstruction to succeed"
     date_col = table[0].index("Datum")
@@ -370,7 +370,7 @@ def test_date_glued_directly_onto_the_next_words_description_is_not_lost():
     ]
     lines = [header, row1, row2]
 
-    table, _preamble = _reconstruct_columned_table(lines)
+    table, _preamble, _extra = _reconstruct_columned_table(lines)
 
     assert table, "expected the column reconstruction to succeed"
     date_col = table[0].index("Datum")
@@ -407,7 +407,7 @@ def test_first_rows_own_tall_cell_starting_above_its_date_is_not_dropped():
     ]
     lines = [header, orphan_first_line, row1, row2]
 
-    table, preamble = _reconstruct_columned_table(lines)
+    table, preamble, _extra = _reconstruct_columned_table(lines)
 
     assert table, "expected the column reconstruction to succeed"
     desc_col = table[0].index("Verwendungszweck")
@@ -450,7 +450,7 @@ def test_opening_balance_line_before_first_row_is_not_merged_into_it():
     ]
     lines = [header, balance_line, row1, row2]
 
-    table, preamble = _reconstruct_columned_table(lines)
+    table, preamble, _extra = _reconstruct_columned_table(lines)
 
     assert table, "expected the column reconstruction to succeed"
     betrag_col = table[0].index("Betrag")
@@ -494,7 +494,7 @@ def test_header_column_matching_both_date_and_amount_keywords_is_left_untyped():
     ]
     lines = [header, row1, row2]
 
-    table, _preamble = _reconstruct_columned_table(lines)
+    table, _preamble, _extra = _reconstruct_columned_table(lines)
 
     assert table, "expected the column reconstruction to succeed"
     merged_col = table[0].index("WertstellungBuchungstextBetrag")
@@ -548,7 +548,7 @@ def test_ocr_missing_only_the_date_label_still_finds_the_header():
     ]
     lines = [header, row1, row2]
 
-    table, _preamble = _reconstruct_columned_table(lines)
+    table, _preamble, _extra = _reconstruct_columned_table(lines)
 
     assert table, "expected the amount-only header fallback to find a table"
     assert table[1][0] == "02.01.2025"
@@ -578,9 +578,40 @@ def test_amount_only_header_fallback_is_rejected_when_first_column_is_not_dates(
     ]
     lines = [header, row1, row2]
 
-    table, _preamble = _reconstruct_columned_table(lines)
+    table, _preamble, _extra = _reconstruct_columned_table(lines)
 
     assert table is None
+
+
+def test_columned_table_returns_trailing_page_furniture_as_extra():
+    # After the last transaction and a page break, a real statement repeats its
+    # page furniture ("Seite 1/1", a running-balance restatement, ...). That
+    # content is currently discarded after the page break; it must instead come
+    # back as the third return value so the caller can surface it, and it must
+    # never be folded into the last transaction's own cells.
+    header = [
+        _word("Datum", 0, 40, 0),
+        _word("Erlaeuterung", 60, 200, 0),
+        _word("Betrag", 300, 360, 0),
+    ]
+    row1 = [
+        _word("01.03.2026", 0, 60, 100),
+        _word("Gutschrift", 60, 130, 100),
+        _word("1.200,00", 300, 350, 100),
+    ]
+    row2 = [
+        _word("15.03.2026", 0, 60, 120),
+        _word("Lastschrift", 60, 130, 120),
+        _word("-85,40", 300, 350, 120),
+    ]
+    footer = [_word("Seite", 0, 30, 200), _word("1/1", 35, 60, 200)]
+    lines = [header, row1, row2, _PAGE_BREAK, footer]
+
+    table, preamble, extra = _reconstruct_columned_table(lines)
+
+    assert table is not None and len(table) >= 3          # header + 2 rows
+    assert "Seite 1/1" in (extra or "")
+    assert all("Seite 1/1" not in cell for row in table for cell in row)
 
 
 def test_financial_table_returns_trailing_non_amount_lines_as_extra():

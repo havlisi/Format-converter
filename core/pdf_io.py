@@ -445,7 +445,9 @@ def _column_index_for(x0: float, boundaries: List[float]) -> int:
     return len(boundaries) - 1
 
 
-def _reconstruct_columned_table(lines: List[List[dict]]) -> Tuple[Optional[List[List[str]]], Optional[str]]:
+def _reconstruct_columned_table(
+    lines: List[List[dict]],
+) -> Tuple[Optional[List[List[str]]], Optional[str], Optional[str]]:
     """Reconstructs transaction rows using the document's own column positions, derived
     from its header row, so the output mirrors the source layout — same column names and
     order — instead of a generic Date/Amount/Description shape.
@@ -456,13 +458,16 @@ def _reconstruct_columned_table(lines: List[List[dict]]) -> Tuple[Optional[List[
     split across two physical lines by a narrow column still lands in one row instead
     of falsely starting a new one.
 
-    Returns (table_rows, preamble_text); (None, None) if no header row is found, it has
-    no recognizable date column, or fewer than two rows resulted — the caller then falls
-    back to the plainer anchor-based reconstruction.
+    Returns (table_rows, preamble_text, extra_text); (None, None, None) if no header row
+    is found, it has no recognizable date column, or fewer than two rows resulted — the
+    caller then falls back to the plainer anchor-based reconstruction. extra_text is the
+    newline-joined run of non-row page furniture seen after the last row started, past a
+    page break (a repeated title block, closing-summary lines) that carries no amount of
+    its own; None when there is none.
     """
     header_words, date_label_found = _find_header_words(lines)
     if not header_words:
-        return None, None
+        return None, None, None
 
     columns = _cluster_header_columns(header_words)
     labels = [label for label, _ in columns]
@@ -480,7 +485,7 @@ def _reconstruct_columned_table(lines: List[List[dict]]) -> Tuple[Optional[List[
             # back to the plainer reconstruction, same as any other bad fit.
             date_cols = {0}
         else:
-            return None, None
+            return None, None, None
     anchor_date_col = min(date_cols)
     amount_cols = {i for i, l in enumerate(labels) if _HEADER_AMOUNT_LABEL_RE.search(l)}
     # A column whose clustered label matches BOTH a date and an amount keyword
@@ -512,6 +517,13 @@ def _reconstruct_columned_table(lines: List[List[dict]]) -> Tuple[Optional[List[
             break
 
     preamble_parts: List[str] = []
+    # Non-row page furniture seen after a page break once at least one row exists —
+    # a repeated title block, a "Seite x/y", a closing-summary line. Dropped from the
+    # table either way; held here so that, if it turns out to be the last content in
+    # the document (no further real row follows), it still reaches the caller as
+    # `extra` instead of vanishing. Cleared the moment a genuine new row starts —
+    # furniture with a real row after it was mid-table noise, not trailing text.
+    trailing_parts: List[str] = []
     # Lines seen before the first transaction row (account title, holder, date range,
     # opening balance) — a multi-page statement repeats this exact block on every page,
     # and it doesn't look like a header (no date+amount keywords) so it isn't caught by
@@ -580,10 +592,24 @@ def _reconstruct_columned_table(lines: List[List[dict]]) -> Tuple[Optional[List[
                     buckets[target_col].insert(0, glued_tail)
 
         if after_page_break and not is_new_row:
+            # Repeated page furniture after the previous page's last transaction.
+            # An amount-free line here is real trailing text if nothing more
+            # follows — hold it. A line carrying an amount in its own amount
+            # bucket is a standalone balance/total, not furniture: leave the
+            # existing drop untouched rather than relocate a reconcilable figure
+            # into `extra`.
+            if rows and not any(
+                _parse_first_bare_amount(" ".join(buckets[col_i])) for col_i in amount_cols
+            ):
+                trailing_parts.append(line_text)
             continue
         after_page_break = False
 
         if is_new_row:
+            # A real new row means any furniture held since the last page break
+            # was mid-table noise, not trailing text — only a run that survives
+            # to the end of the loop is real `extra`.
+            trailing_parts.clear()
             if current:
                 rows.append(current)
             current = {i: [] for i in range(len(columns))}
@@ -632,7 +658,7 @@ def _reconstruct_columned_table(lines: List[List[dict]]) -> Tuple[Optional[List[
     if current:
         rows.append(current)
     if len(rows) < 2:
-        return None, None
+        return None, None, None
 
     amount_col_order = sorted(amount_cols)
     full_text_parts_by_row = [
@@ -753,9 +779,9 @@ def _reconstruct_columned_table(lines: List[List[dict]]) -> Tuple[Optional[List[
     # layout doesn't actually fit the column model we built — don't ship a table with
     # silently wrong or missing financial values, fall back to the plainer reconstruction.
     if total_amount_rows and valid_amounts / total_amount_rows < 0.9:
-        return None, None
+        return None, None, None
     if valid_dates / len(rows) < 0.9:
-        return None, None
+        return None, None, None
 
     header_row = labels + ["IBAN"]
     if not any_iban:
@@ -764,7 +790,8 @@ def _reconstruct_columned_table(lines: List[List[dict]]) -> Tuple[Optional[List[
 
     table = [header_row] + row_outputs
     preamble = "\n".join(preamble_parts) if preamble_parts else None
-    return table, preamble
+    extra = "\n".join(trailing_parts) if trailing_parts else None
+    return table, preamble, extra
 
 
 def _reconstruct_financial_table(
