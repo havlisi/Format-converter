@@ -927,15 +927,19 @@ def read_pdf(path: str) -> List[Block]:
         # Prefer reconstructing real columns from the document's own header row; only
         # fall back to the generic date+amount anchor shape (or, failing that, plain
         # text) when no header row can be found or matched to a date column.
-        recon_table, preamble = _reconstruct_columned_table(pending_lines)
+        recon_table, preamble, extra = _reconstruct_columned_table(pending_lines)
         if not recon_table:
-            recon_table, preamble = _reconstruct_financial_table(
+            recon_table, preamble, extra = _reconstruct_financial_table(
                 [_line_text(words) for words in pending_lines if words is not _PAGE_BREAK]
             )
         if recon_table:
-            if preamble:
-                blocks.append(("text", preamble))
+            # Table first, then a single text block carrying everything that framed
+            # it — the preamble (holder/IBAN/period lines) and any trailing furniture
+            # (page footers, closing-balance notes), joined by a blank line.
             blocks.append(("table", recon_table))
+            context = "\n\n".join(p for p in (preamble, extra) if p)
+            if context:
+                blocks.append(("text", context))
         else:
             blocks.append((
                 "text",

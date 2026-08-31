@@ -692,3 +692,25 @@ def test_financial_table_trailing_amount_line_stays_on_last_row_not_extra():
     # transaction, never be siphoned into `extra`
     assert "Saldo 1.234,56 EUR" in table[-1][-1]
     assert extra is None or "Saldo 1.234,56 EUR" not in extra
+
+
+def test_read_pdf_places_table_first_then_context_block(tmp_path):
+    p = tmp_path / "ctx.pdf"
+    # holder / IBAN / period lines, a dated transaction table, then a page footer.
+    lines = [
+        "Kontoauszug Testbank",
+        "Kontoinhaber Max Mustermann",
+        "IBAN DE89370400440532013000",
+        "Zeitraum 01.01.2024 bis 31.01.2024",
+        "01.01.2024 Acme Corp Miete Januar 1.000,00 EUR 5.000,00 EUR",
+        "02.01.2024 Beta LLC Nebenkosten -200,00 EUR 4.800,00 EUR",
+        "Seite 1 von 1",
+    ]
+    write_pdf([("text", "\n".join(lines))], str(p))
+    blocks = read_pdf(str(p))
+
+    kinds = [k for k, _ in blocks]
+    assert kinds == ["table", "text"]            # table BEFORE text
+    context = blocks[1][1]
+    assert "IBAN" in context                     # preamble preserved
+    assert "Seite 1 von 1" in context            # trailing preserved
