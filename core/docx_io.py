@@ -37,3 +37,16 @@ def write_docx(blocks: List[Block], path: str) -> None:
                     val = row[c_idx] if c_idx < len(row) else ""
                     table.cell(r_idx, c_idx).text = "" if val is None else str(val)
     doc.save(path)
+
+
+def pdf_to_docx(pdf_path: str, docx_path: str) -> None:
+    """Convert a PDF to DOCX preserving page layout (fonts, positions, tables,
+    images) via pdf2docx. A scanned PDF with no text layer has no layout to
+    preserve — that case is handled by the caller-facing wrapper in Task 2."""
+    from pdf2docx import Converter
+
+    cv = Converter(pdf_path)
+    try:
+        cv.convert(docx_path)
+    finally:
+        cv.close()
