@@ -461,9 +461,11 @@ def _reconstruct_columned_table(
     Returns (table_rows, preamble_text, extra_text); (None, None, None) if no header row
     is found, it has no recognizable date column, or fewer than two rows resulted — the
     caller then falls back to the plainer anchor-based reconstruction. extra_text is the
-    newline-joined run of non-row page furniture seen after the last row started, past a
-    page break (a repeated title block, closing-summary lines) that carries no amount of
-    its own; None when there is none.
+    newline-joined run of amount-free non-row lines left after the last transaction —
+    a closing-summary line on the same page ("Neuer Saldo per ..."), page furniture
+    repeated after a page break ("Seite 1 von 1"); None when there is none. Mirrors
+    `_reconstruct_financial_table`, including its tradeoff: an amount-free wrapped
+    continuation of the last row's own description ends up here rather than in a cell.
     """
     header_words, date_label_found = _find_header_words(lines)
     if not header_words:
@@ -517,13 +519,22 @@ def _reconstruct_columned_table(
             break
 
     preamble_parts: List[str] = []
-    # Non-row page furniture seen after a page break once at least one row exists —
-    # a repeated title block, a "Seite x/y", a closing-summary line. Dropped from the
-    # table either way; held here so that, if it turns out to be the last content in
-    # the document (no further real row follows), it still reaches the caller as
-    # `extra` instead of vanishing. Cleared the moment a genuine new row starts —
-    # furniture with a real row after it was mid-table noise, not trailing text.
+    # Non-row, amount-free lines seen after the last row started. Two feeders:
+    #   * `pending_tail` — a continuation/summary line on the SAME page as the last
+    #     transactions (a closing "Neuer Saldo per ...", a "Seite 1 von 1"). While
+    #     more rows are still to come it's flushed back into the row that was open
+    #     (identical to folding it in directly); only what's left at end of loop is
+    #     real trailing text. Mirrors the sibling `_reconstruct_financial_table`.
+    #   * `trailing_parts` — furniture repeated after a page break with no further
+    #     real row (a dedicated trailing summary page).
+    # At end of loop the two, in reading order, become `extra`. Accepted tradeoff
+    # (same as the sibling): an amount-free wrapped continuation of the LAST row's
+    # own description lands in `extra` rather than its cell — the text is still
+    # preserved, just below the table. A line whose OWN amount-column bucket parses
+    # an amount is a standalone total/balance, never furniture: it stays folded
+    # into the open row (no feeder branch for it).
     trailing_parts: List[str] = []
+    pending_tail: List[Tuple[str, List[List[str]]]] = []
     # Lines seen before the first transaction row (account title, holder, date range,
     # opening balance) — a multi-page statement repeats this exact block on every page,
     # and it doesn't look like a header (no date+amount keywords) so it isn't caught by
@@ -597,21 +608,34 @@ def _reconstruct_columned_table(
             # follows — hold it. A line carrying an amount in its own amount
             # bucket is a standalone balance/total, not furniture: leave the
             # existing drop untouched rather than relocate a reconcilable figure
-            # into `extra`.
-            if rows and not any(
-                _parse_first_bare_amount(" ".join(buckets[col_i])) for col_i in amount_cols
+            # into `extra`. An empty `amount_cols` can't prove a line amount-free
+            # — treat it as before (drop), don't sweep everything into `extra`.
+            if (
+                rows
+                and amount_cols
+                and not any(
+                    _parse_first_bare_amount(" ".join(buckets[col_i])) for col_i in amount_cols
+                )
             ):
                 trailing_parts.append(line_text)
             continue
         after_page_break = False
 
         if is_new_row:
-            # A real new row means any furniture held since the last page break
-            # was mid-table noise, not trailing text — only a run that survives
-            # to the end of the loop is real `extra`.
+            # A real new row means anything held as trailing since the last row
+            # was actually mid-table content: page furniture after a break was
+            # noise (drop it); a same-page continuation belonged to the row that
+            # was open (flush it back in). Only what survives to end of loop is
+            # real `extra`.
             trailing_parts.clear()
             if current:
+                for tail_text, tail_buckets in pending_tail:
+                    current[_RAW_LINES_KEY].append(tail_text)
+                    for i, bucket in enumerate(tail_buckets):
+                        if bucket:
+                            current[i].append(" ".join(bucket))
                 rows.append(current)
+            pending_tail.clear()
             current = {i: [] for i in range(len(columns))}
             current[_RAW_LINES_KEY] = []
             current[_ANCHOR_DATE_KEY] = date_frag
@@ -648,6 +672,22 @@ def _reconstruct_columned_table(
                     preamble_line_set.add(line_text)
                 else:
                     pending_orphan_lines.append((line_text, buckets))
+            continue
+        elif (
+            rows
+            and amount_cols
+            and not any(
+                _parse_first_bare_amount(" ".join(buckets[col_i])) for col_i in amount_cols
+            )
+        ):
+            # Amount-free, doesn't start a row, and at least one row is already
+            # closed: a same-page continuation or closing-summary line. Hold it
+            # rather than fold it straight into the open row — if a genuine new
+            # row follows it belonged to the row that was open and is flushed in
+            # there (above); if nothing more follows it's trailing text and
+            # becomes `extra`. See the buffer comment near `trailing_parts` for
+            # the accepted tradeoff on the last row's own wrapped description.
+            pending_tail.append((line_text, buckets))
             continue
 
         current[_RAW_LINES_KEY].append(line_text)
@@ -790,7 +830,10 @@ def _reconstruct_columned_table(
 
     table = [header_row] + row_outputs
     preamble = "\n".join(preamble_parts) if preamble_parts else None
-    extra = "\n".join(trailing_parts) if trailing_parts else None
+    # Same-page trailing lines (held while more rows might still come) then any
+    # post-page-break furniture — in reading order.
+    extra_parts = [tail_text for tail_text, _ in pending_tail] + trailing_parts
+    extra = "\n".join(extra_parts) if extra_parts else None
     return table, preamble, extra
 
 

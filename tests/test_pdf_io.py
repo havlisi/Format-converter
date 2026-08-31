@@ -611,7 +611,51 @@ def test_columned_table_returns_trailing_page_furniture_as_extra():
 
     assert table is not None and len(table) >= 3          # header + 2 rows
     assert "Seite 1/1" in (extra or "")
-    assert all("Seite 1/1" not in cell for row in table for cell in row)
+    assert all("Seite 1/1" not in (cell or "") for row in table for cell in row)
+
+
+def test_columned_table_returns_same_page_closing_summary_as_extra():
+    # The realistic case: the closing balance / summary sits on the SAME page as
+    # the last transactions, with no page break before it. An amount-free non-row
+    # line after the last transaction must come back as `extra` (mirroring
+    # _reconstruct_financial_table), never folded into the last row's cells.
+    header = [
+        _word("Datum", 0, 40, 0),
+        _word("Erlaeuterung", 60, 240, 0),
+        _word("Betrag", 300, 360, 0),
+    ]
+    row1 = [
+        _word("01.03.2026", 0, 60, 100),
+        _word("Gutschrift", 60, 130, 100),
+        _word("1.200,00", 300, 350, 100),
+    ]
+    row2 = [
+        _word("15.03.2026", 0, 60, 120),
+        _word("Lastschrift", 60, 130, 120),
+        _word("-85,40", 300, 350, 120),
+    ]
+    # Both lines amount-free in their own amount-column bucket (nothing lands at
+    # x >= ~294): the date-like "31.03.2026" sits in the description column.
+    saldo = [
+        _word("Neuer", 60, 95, 200),
+        _word("Saldo", 100, 135, 200),
+        _word("per", 140, 160, 200),
+        _word("31.03.2026", 165, 220, 200),
+    ]
+    seite = [_word("Seite", 60, 95, 220), _word("1", 100, 108, 220),
+             _word("von", 112, 130, 220), _word("1", 134, 142, 220)]
+    lines = [header, row1, row2, saldo, seite]
+
+    table, preamble, extra = _reconstruct_columned_table(lines)
+
+    assert table is not None and len(table) == 3          # header + 2 rows
+    assert "Neuer Saldo per 31.03.2026" in (extra or "")
+    assert "Seite 1 von 1" in (extra or "")
+    assert all(
+        "Neuer Saldo per 31.03.2026" not in (cell or "") and "Seite 1 von 1" not in (cell or "")
+        for row in table
+        for cell in row
+    )
 
 
 def test_financial_table_returns_trailing_non_amount_lines_as_extra():
