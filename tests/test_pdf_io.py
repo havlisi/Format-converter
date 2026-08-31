@@ -6,6 +6,7 @@ from core.pdf_io import (
     _is_degenerate_table,
     _PAGE_BREAK,
     _ROW_START_DATE_RE,
+    _reconstruct_financial_table,
 )
 import pytest
 
@@ -163,7 +164,7 @@ def test_single_amount_column_ignores_amount_embedded_in_description():
     ]
     lines = [header, row1, row2]
 
-    table, _preamble = _reconstruct_columned_table(lines)
+    table, _preamble, _extra = _reconstruct_columned_table(lines)
 
     assert table, "expected the column reconstruction to succeed"
     betrag_col = table[0].index("Betrag")
@@ -241,7 +242,7 @@ def test_both_present_amount_pair_is_not_mistaken_for_a_debit_credit_split():
     ]
     lines = [header, row1, row2]
 
-    table, _preamble = _reconstruct_columned_table(lines)
+    table, _preamble, _extra = _reconstruct_columned_table(lines)
 
     assert table, "expected the column reconstruction to succeed"
     orig_col = table[0].index("Originalumsatz")
@@ -334,7 +335,7 @@ def test_page_footer_glued_onto_open_row_does_not_override_its_real_date():
     ]
     lines = [preamble, header, row1, footer, _PAGE_BREAK, row2]
 
-    table, _preamble = _reconstruct_columned_table(lines)
+    table, _preamble, _extra = _reconstruct_columned_table(lines)
 
     assert table, "expected the column reconstruction to succeed"
     date_col = table[0].index("Datum")
@@ -369,7 +370,7 @@ def test_date_glued_directly_onto_the_next_words_description_is_not_lost():
     ]
     lines = [header, row1, row2]
 
-    table, _preamble = _reconstruct_columned_table(lines)
+    table, _preamble, _extra = _reconstruct_columned_table(lines)
 
     assert table, "expected the column reconstruction to succeed"
     date_col = table[0].index("Datum")
@@ -406,7 +407,7 @@ def test_first_rows_own_tall_cell_starting_above_its_date_is_not_dropped():
     ]
     lines = [header, orphan_first_line, row1, row2]
 
-    table, preamble = _reconstruct_columned_table(lines)
+    table, preamble, _extra = _reconstruct_columned_table(lines)
 
     assert table, "expected the column reconstruction to succeed"
     desc_col = table[0].index("Verwendungszweck")
@@ -449,7 +450,7 @@ def test_opening_balance_line_before_first_row_is_not_merged_into_it():
     ]
     lines = [header, balance_line, row1, row2]
 
-    table, preamble = _reconstruct_columned_table(lines)
+    table, preamble, _extra = _reconstruct_columned_table(lines)
 
     assert table, "expected the column reconstruction to succeed"
     betrag_col = table[0].index("Betrag")
@@ -493,7 +494,7 @@ def test_header_column_matching_both_date_and_amount_keywords_is_left_untyped():
     ]
     lines = [header, row1, row2]
 
-    table, _preamble = _reconstruct_columned_table(lines)
+    table, _preamble, _extra = _reconstruct_columned_table(lines)
 
     assert table, "expected the column reconstruction to succeed"
     merged_col = table[0].index("WertstellungBuchungstextBetrag")
@@ -547,7 +548,7 @@ def test_ocr_missing_only_the_date_label_still_finds_the_header():
     ]
     lines = [header, row1, row2]
 
-    table, _preamble = _reconstruct_columned_table(lines)
+    table, _preamble, _extra = _reconstruct_columned_table(lines)
 
     assert table, "expected the amount-only header fallback to find a table"
     assert table[1][0] == "02.01.2025"
@@ -577,6 +578,246 @@ def test_amount_only_header_fallback_is_rejected_when_first_column_is_not_dates(
     ]
     lines = [header, row1, row2]
 
-    table, _preamble = _reconstruct_columned_table(lines)
+    table, _preamble, _extra = _reconstruct_columned_table(lines)
 
     assert table is None
+
+
+def test_columned_table_returns_trailing_page_furniture_as_extra():
+    # After the last transaction and a page break, a real statement repeats its
+    # page furniture ("Seite 1/1", a running-balance restatement, ...). That
+    # content is currently discarded after the page break; it must instead come
+    # back as the third return value so the caller can surface it, and it must
+    # never be folded into the last transaction's own cells.
+    header = [
+        _word("Datum", 0, 40, 0),
+        _word("Erlaeuterung", 60, 200, 0),
+        _word("Betrag", 300, 360, 0),
+    ]
+    row1 = [
+        _word("01.03.2026", 0, 60, 100),
+        _word("Gutschrift", 60, 130, 100),
+        _word("1.200,00", 300, 350, 100),
+    ]
+    row2 = [
+        _word("15.03.2026", 0, 60, 120),
+        _word("Lastschrift", 60, 130, 120),
+        _word("-85,40", 300, 350, 120),
+    ]
+    footer = [_word("Seite", 0, 30, 200), _word("1/1", 35, 60, 200)]
+    lines = [header, row1, row2, _PAGE_BREAK, footer]
+
+    table, preamble, extra = _reconstruct_columned_table(lines)
+
+    assert table is not None and len(table) >= 3          # header + 2 rows
+    assert "Seite 1/1" in (extra or "")
+    assert all("Seite 1/1" not in (cell or "") for row in table for cell in row)
+
+
+def test_columned_table_returns_same_page_closing_summary_as_extra():
+    # The realistic case: the closing balance / summary sits on the SAME page as
+    # the last transactions, with no page break before it. An amount-free non-row
+    # line after the last transaction must come back as `extra` (mirroring
+    # _reconstruct_financial_table), never folded into the last row's cells.
+    header = [
+        _word("Datum", 0, 40, 0),
+        _word("Erlaeuterung", 60, 240, 0),
+        _word("Betrag", 300, 360, 0),
+    ]
+    row1 = [
+        _word("01.03.2026", 0, 60, 100),
+        _word("Gutschrift", 60, 130, 100),
+        _word("1.200,00", 300, 350, 100),
+    ]
+    row2 = [
+        _word("15.03.2026", 0, 60, 120),
+        _word("Lastschrift", 60, 130, 120),
+        _word("-85,40", 300, 350, 120),
+    ]
+    # Both lines amount-free in their own amount-column bucket (nothing lands at
+    # x >= ~294): the date-like "31.03.2026" sits in the description column.
+    saldo = [
+        _word("Neuer", 60, 95, 200),
+        _word("Saldo", 100, 135, 200),
+        _word("per", 140, 160, 200),
+        _word("31.03.2026", 165, 220, 200),
+    ]
+    seite = [_word("Seite", 60, 95, 220), _word("1", 100, 108, 220),
+             _word("von", 112, 130, 220), _word("1", 134, 142, 220)]
+    lines = [header, row1, row2, saldo, seite]
+
+    table, preamble, extra = _reconstruct_columned_table(lines)
+
+    assert table is not None and len(table) == 3          # header + 2 rows
+    assert "Neuer Saldo per 31.03.2026" in (extra or "")
+    assert "Seite 1 von 1" in (extra or "")
+    assert all(
+        "Neuer Saldo per 31.03.2026" not in (cell or "") and "Seite 1 von 1" not in (cell or "")
+        for row in table
+        for cell in row
+    )
+
+
+def test_financial_table_returns_trailing_non_amount_lines_as_extra():
+    lines = [
+        "Kontoauszug 03/2026",
+        "01.03.2026 Gutschrift Miete 1.200,00 EUR",
+        "15.03.2026 Lastschrift Strom -85,40 EUR",
+        "Seite 1 von 1",
+        "Erstellt am 31.03.2026",
+    ]
+    table, preamble, extra = _reconstruct_financial_table(lines)
+
+    assert table is not None
+    assert preamble == "Kontoauszug 03/2026"
+    assert extra == "Seite 1 von 1\nErstellt am 31.03.2026"
+    # trailing lines must NOT have been folded into the last row's Description
+    assert "Seite 1 von 1" not in table[-1][-1]
+
+
+def test_financial_table_early_return_is_three_none():
+    assert _reconstruct_financial_table(["nothing here", "no anchors"]) == (None, None, None)
+
+
+def test_financial_table_trailing_amount_line_stays_on_last_row_not_extra():
+    lines = [
+        "01.03.2026 Gutschrift Miete 1.200,00 EUR",
+        "15.03.2026 Lastschrift Strom -85,40 EUR",
+        "Saldo 1.234,56 EUR",
+    ]
+    table, preamble, extra = _reconstruct_financial_table(lines)
+
+    assert table is not None
+    # an amount-bearing footer (closing balance) must fold into the last
+    # transaction, never be siphoned into `extra`
+    assert "Saldo 1.234,56 EUR" in table[-1][-1]
+    assert extra is None or "Saldo 1.234,56 EUR" not in extra
+
+
+def test_financial_table_bare_amount_closing_balance_stays_on_last_row_not_extra():
+    # F1: a bare closing balance ("Neuer Kontostand 1.114,60") carries no
+    # currency code, so _extract_amounts misses it. Without also checking for a
+    # bare amount, the line is routed into `extra`/the context text block —
+    # displacing a real number out of the table, which the spec forbids.
+    lines = [
+        "01.03.2026 Gutschrift Miete 1.200,00 EUR",
+        "15.03.2026 Lastschrift Strom -85,40 EUR",
+        "Neuer Kontostand 1.114,60",
+    ]
+    table, preamble, extra = _reconstruct_financial_table(lines)
+
+    assert table is not None
+    assert "Neuer Kontostand 1.114,60" in table[-1][-1]
+    assert extra is None or "Neuer Kontostand 1.114,60" not in extra
+
+
+def test_columned_merged_header_empty_amount_cols_still_feeds_extra():
+    # F5: a font-kerning-merged date+amount header column ("Wertstellung...Betrag"
+    # as one run) is left untyped, so `amount_cols` resolves empty. The
+    # surrounding-text capture must still work off a whole-line bare-amount scan:
+    # an amount-free footer after the last row reaches `extra`, while an
+    # amount-bearing summary line folds into the open row instead.
+    header = [
+        _word("Buchung", 0, 60, 0),
+        _word("WertstellungBuchungstextBetrag", 70, 300, 0),
+        _word("Waehrung", 400, 460, 0),
+    ]
+    row1 = [
+        _word("1/2/2026", 0, 50, 100),
+        _word("1/2/2026", 70, 120, 100),
+        _word("Ueberweisung", 125, 200, 100),
+        _word("150.00", 205, 250, 100),
+        _word("EUR", 400, 430, 100),
+    ]
+    row2 = [
+        _word("1/3/2026", 0, 50, 120),
+        _word("1/3/2026", 70, 120, 120),
+        _word("Lastschrift", 125, 200, 120),
+        _word("75.00", 205, 250, 120),
+        _word("EUR", 400, 430, 120),
+    ]
+    summary = [_word("Zwischensumme", 125, 210, 190), _word("5.000,00", 215, 260, 190)]
+    footer = [_word("Seite", 70, 100, 200), _word("1", 105, 112, 200),
+              _word("von", 116, 134, 200), _word("1", 138, 146, 200)]
+    lines = [header, row1, row2, summary, footer]
+
+    table, _preamble, extra = _reconstruct_columned_table(lines)
+
+    assert table, "expected reconstruction to succeed with an empty amount_cols"
+    merged_col = table[0].index("WertstellungBuchungstextBetrag")
+    assert "Seite 1 von 1" in (extra or "")
+    assert all("Seite 1 von 1" not in (cell or "") for row in table for cell in row)
+    assert "5.000,00" not in (extra or "")
+    assert "5.000,00" in table[-1][merged_col]
+
+
+def test_columned_buffered_wrapped_line_keeps_source_order_before_amount_line():
+    # F6: a wrapped amount-free description line is buffered in `pending_tail`; an
+    # amount-bearing continuation then reaches the still-open row. The buffered
+    # line must fold in BEFORE that continuation (source order) — not after it,
+    # which is what happened when the buffer was only drained on the next row.
+    header = [
+        _word("Datum", 0, 40, 0),
+        _word("Verwendungszweck", 60, 260, 0),
+        _word("Betrag", 300, 360, 0),
+    ]
+    rowA = [
+        _word("01.03.2026", 0, 60, 100),
+        _word("Kauf", 60, 90, 100),
+        _word("100,00", 300, 340, 100),
+        _word("EUR", 345, 370, 100),
+    ]
+    rowB = [
+        _word("05.03.2026", 0, 60, 120),
+        _word("Miete", 60, 95, 120),
+        _word("200,00", 300, 340, 120),
+        _word("EUR", 345, 370, 120),
+    ]
+    wrapped = [_word("WrappedPurpose", 60, 150, 140)]
+    zwischensaldo = [
+        _word("Zwischensaldo", 60, 140, 150),
+        _word("5.000,00", 300, 340, 150),
+        _word("EUR", 345, 370, 150),
+    ]
+    rowC = [
+        _word("10.03.2026", 0, 60, 200),
+        _word("Strom", 60, 95, 200),
+        _word("50,00", 300, 335, 200),
+        _word("EUR", 340, 365, 200),
+    ]
+    lines = [header, rowA, rowB, wrapped, zwischensaldo, rowC]
+
+    table, _preamble, _extra = _reconstruct_columned_table(lines)
+
+    assert table, "expected the column reconstruction to succeed"
+    desc_col = table[0].index("Verwendungszweck")
+    betrag_col = table[0].index("Betrag")
+    rowB_desc = table[2][desc_col]
+    assert "WrappedPurpose" in rowB_desc and "Zwischensaldo" in rowB_desc
+    assert rowB_desc.index("WrappedPurpose") < rowB_desc.index("Zwischensaldo")
+    # no number moved: every row keeps its own Betrag
+    assert table[1][betrag_col] == "100,00"
+    assert table[2][betrag_col] == "200,00"
+    assert table[3][betrag_col] == "50,00"
+
+
+def test_read_pdf_places_table_first_then_context_block(tmp_path):
+    p = tmp_path / "ctx.pdf"
+    # holder / IBAN / period lines, a dated transaction table, then a page footer.
+    lines = [
+        "Kontoauszug Testbank",
+        "Kontoinhaber Max Mustermann",
+        "IBAN DE89370400440532013000",
+        "Zeitraum 01.01.2024 bis 31.01.2024",
+        "01.01.2024 Acme Corp Miete Januar 1.000,00 EUR 5.000,00 EUR",
+        "02.01.2024 Beta LLC Nebenkosten -200,00 EUR 4.800,00 EUR",
+        "Seite 1 von 1",
+    ]
+    write_pdf([("text", "\n".join(lines))], str(p))
+    blocks = read_pdf(str(p))
+
+    kinds = [k for k, _ in blocks]
+    assert kinds == ["table", "text"]            # table BEFORE text
+    context = blocks[1][1]
+    assert "IBAN" in context                     # preamble preserved
+    assert "Seite 1 von 1" in context            # trailing preserved

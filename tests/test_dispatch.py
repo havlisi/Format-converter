@@ -1,5 +1,6 @@
 import os
 import pytest
+from core import dispatch
 from core.dispatch import convert, ext_of, output_path_for, SUPPORTED_EXTS
 from core.csv_io import write_csv
 
@@ -112,3 +113,33 @@ def test_convert_pdf_to_every_other_format(tmp_path, target_ext):
     out_path = convert(str(src), target_ext)
 
     assert os.path.exists(out_path)
+
+
+def test_pdf_to_docx_uses_direct_route(tmp_path, monkeypatch):
+    src = str(tmp_path / "a.pdf")
+    open(src, "wb").write(b"%PDF-1.4\n%%EOF\n")
+
+    calls = {"direct": 0, "reader": 0}
+    monkeypatch.setitem(dispatch._DIRECT_ROUTES, ("pdf", "docx"),
+                        lambda s, t: calls.__setitem__("direct", calls["direct"] + 1))
+    monkeypatch.setitem(dispatch._READERS, "pdf",
+                        lambda p: calls.__setitem__("reader", calls["reader"] + 1) or [("text", "x")])
+
+    out = dispatch.convert(src, "docx")
+
+    assert out == str(tmp_path / "a.docx")
+    assert calls == {"direct": 1, "reader": 0}
+
+
+def test_pdf_to_xlsx_still_uses_block_pipeline(tmp_path, monkeypatch):
+    src = str(tmp_path / "a.pdf")
+    open(src, "wb").write(b"%PDF-1.4\n%%EOF\n")
+
+    seen = {}
+    monkeypatch.setitem(dispatch._READERS, "pdf", lambda p: [("table", [["1"]])])
+    monkeypatch.setitem(dispatch._WRITERS, "xlsx",
+                        lambda blocks, path: seen.setdefault("blocks", blocks))
+
+    dispatch.convert(src, "xlsx")
+
+    assert seen["blocks"] == [("table", [["1"]])]
