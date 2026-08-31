@@ -22,6 +22,119 @@ fall back to safe, unstructured plain text over shipping a wrong or misattribute
 showed up repeatedly: several real bugs this session were "confidently wrong structured data"
 rather than crashes, which is the worse failure mode and the one to keep hunting for.
 
+## Giving a copy to a colleague (clean Windows machine, step by step)
+
+Written for a non-developer following it verbatim. Everything is free; no admin rights needed
+beyond installing Python.
+
+1. **Install Python.** Go to <https://www.python.org/downloads/>, click the yellow "Download
+   Python 3.x" button, run the installer. On the first installer screen **tick "Add python.exe
+   to PATH"** before clicking "Install Now" — skipping this is the single most common thing that
+   breaks step 5.
+
+2. **Make a GitHub account.** Go to <https://github.com/signup>, pick a username, confirm the
+   email. Free tier is all that's needed. Then tell the repo owner (Isidora) that username so she
+   can add it under the repo's **Settings → Collaborators** — needed only if the repo is private;
+   skip if it's public (it currently is). Either way, having the account is what makes GitHub
+   Desktop's sign-in work.
+
+3. **Install GitHub Desktop and clone the repo.**
+   - Download from <https://desktop.github.com>, run the installer.
+   - Open it, **"Sign in to GitHub.com"**, log in with the account from step 2, authorize in the
+     browser when it asks.
+   - **File → Clone repository… → URL tab.** In the URL field paste
+     `https://github.com/havlisi/Format-converter`. In "Local path" pick where the folder lives
+     (e.g. `C:\Users\<name>\Converter app` — this exact path is what `HANDOFF.md`'s push section
+     already assumes for the deployed copy). Click **Clone**.
+   - GitHub Desktop now shows the repo. **"Repository → Show in Explorer"** opens the folder on
+     disk — that folder directly contains `app.py` and `requirements.txt`.
+
+   **Getting updates later:** open GitHub Desktop, make sure "Current repository" is
+   Format-converter, click **"Fetch origin"**, then **"Pull origin"** if it offers it. That
+   pulls the latest code. Re-run `pip install -r requirements.txt` after a pull only if
+   `requirements.txt` changed (GitHub Desktop's history view shows what changed).
+
+4. **Open a terminal *inside the project folder*.** This matters — every command below only
+   works from the folder that directly contains `app.py` and `requirements.txt`, not its parent
+   and not Downloads. In GitHub Desktop: **Repository → Show in Explorer**. In the Explorer
+   window that opens, click the address bar (the white strip showing the path), type
+   `powershell`, press Enter. A blue window opens, already pointed at the right folder. Confirm
+   it with:
+
+       dir
+
+   The list must include `app.py`, `requirements.txt`, `batch.py`, `core`, `ui`. If it doesn't,
+   you're in the wrong folder — see "`requirements.txt` not found" in Troubleshooting below.
+
+5. **Install the libraries the app needs.** In that same window, run:
+
+       python -m pip install -r requirements.txt
+
+   Wait for it to finish (a minute or two, lots of scrolling text — that's normal). `python -m
+   pip` (not bare `pip`) guarantees it installs for the same Python that runs the app. If it
+   says `python is not recognized`, Python wasn't added to PATH in step 1 — reinstall Python and
+   tick that box.
+
+6. **(Only if she'll convert *scanned* PDFs.)** A scanned PDF is a photo/scan with no selectable
+   text. Those need Tesseract OCR, installed separately:
+
+       winget install UB-Mannheim.TesseractOCR
+
+   Skip this if she's only converting normal PDFs, Word, Excel, or CSV — those work without it.
+   (A scanned PDF without Tesseract fails with a clear message telling her to install it; it
+   never crashes.)
+
+7. **Run the app.**
+
+       python app.py
+
+   A window titled "Format Converter" opens. (It uses the Edge **WebView2** runtime, which ships
+   with Windows 10/11 by default — if the window is blank, install "Evergreen WebView2 Runtime"
+   from Microsoft and rerun.)
+
+   To start it again next time: repeat step 4 (open `powershell` in the folder) and run
+   `python app.py`. That's the whole launch — there's no installer or Start-menu shortcut unless
+   she makes one.
+
+### Using the converter window
+
+1. **Add Files…** — pick one or more files, or **Add Folder…** to queue every supported file in
+   a folder. **Clear** empties the queue. Supported: PDF, XLSX, DOCX, CSV.
+2. **Convert to** — pick the target format from the dropdown.
+3. **Convert All** — each file is written *next to the original*, same name, new extension
+   (`statement.pdf` → `statement.xlsx`). Per-file status shows in the list; a red warning
+   appears first if two queued files would overwrite the same output or if an output already
+   exists.
+4. Financial data caveat to pass along: for anything money-related, **spot-check the numbers
+   against the source**, especially from scanned PDFs. Words the OCR itself flagged as
+   uncertain are wrapped in `¿...?` in the output so they're easy to find.
+
+### Troubleshooting a colleague's setup
+
+Almost every "it doesn't work" here is the terminal not being in the project folder, or `pip`
+and `python` being two different installs. In order:
+
+- **`requirements.txt` not found / `No such file or directory`** — the terminal isn't in the project
+  folder. Run `dir`; if you don't see `app.py` and `requirements.txt`, you're in the wrong
+  place. Fix: GitHub Desktop → **Repository → Show in Explorer**, then address bar → `powershell`
+  → Enter. Or search for it: `Get-ChildItem -Path $HOME -Recurse -Filter requirements.txt
+  -ErrorAction SilentlyContinue | Select-Object FullName`. Watch for a doubled folder like
+  `Format-converter\Format-converter` (or `...-main\...-main` from a ZIP) — the real one is the
+  inner folder that contains `app.py`.
+- **`No module named 'webview'`** (the pip name is `pywebview`, the import name is `webview` —
+  that mismatch is normal) — the libraries were installed for a different Python. Reinstall with
+  `python -m pip install -r requirements.txt` (note the `python -m` prefix), then
+  `python -m pip show pywebview` should print a Version and Location. If `where.exe python`
+  lists more than one path, or a path under `WindowsApps`, that's the Microsoft Store stub —
+  install real Python from python.org with "Add to PATH" ticked, reopen PowerShell, reinstall.
+- **`python` / `pip` is not recognized** — Python isn't on PATH. Reinstall from python.org and
+  tick "Add python.exe to PATH" on the first installer screen.
+- **The window opens but is blank / white** — missing WebView2 runtime. Install "Evergreen
+  Standalone WebView2 Runtime" from Microsoft's site and rerun `python app.py`. (Rare on
+  Win10/11, which bundle it.)
+- **A scanned PDF errors out** mentioning Tesseract — that's step 6; run
+  `winget install UB-Mannheim.TesseractOCR`, then reopen PowerShell so PATH refreshes.
+
 ## The GUI (`app.py`, `ui/index.html`)
 
 Rebuilt from Tkinter to pywebview this session for a modern look (the user showed a reference
