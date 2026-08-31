@@ -767,7 +767,9 @@ def _reconstruct_columned_table(lines: List[List[dict]]) -> Tuple[Optional[List[
     return table, preamble
 
 
-def _reconstruct_financial_table(lines: List[str]) -> Tuple[Optional[List[List[str]]], Optional[str]]:
+def _reconstruct_financial_table(
+    lines: List[str],
+) -> Tuple[Optional[List[List[str]]], Optional[str], Optional[str]]:
     """Groups a borderless statement's physical text lines into transaction rows.
 
     A line carrying a decimal amount anchors a new transaction; lines without one
@@ -781,10 +783,14 @@ def _reconstruct_financial_table(lines: List[str]) -> Tuple[Optional[List[List[s
     split across a page break still ends up as one row, and the whole document
     produces a single continuous table instead of one repeated per page.
 
-    Returns (table_rows, preamble_text). table_rows is None if fewer than two
-    transaction anchors were found (not worth treating as a table).
+    Returns (table_rows, preamble_text, extra_text). table_rows is None if fewer
+    than two transaction anchors were found (not worth treating as a table).
+    extra_text is the newline-joined run of non-amount lines that appeared after
+    the last transaction anchor (page footers, closing-balance notes); None when
+    there are none.
     """
     preamble_parts: List[str] = []
+    trailing_parts: List[str] = []      # non-amount lines after the last anchor
     rows: List[dict] = []
     current: Optional[dict] = None
 
@@ -796,6 +802,11 @@ def _reconstruct_financial_table(lines: List[str]) -> Tuple[Optional[List[List[s
         # interest/repayment totals) that carry no date — those must fold into the
         # preceding transaction's text, not spawn a bogus row that corrupts sums.
         if amounts and date_match:
+            # a new anchor means anything we were holding as "trailing" actually
+            # belonged to the previous transaction's description after all
+            if current is not None and trailing_parts:
+                current["text_parts"].extend(trailing_parts)
+            trailing_parts = []
             if current:
                 rows.append(current)
             current = {
@@ -805,7 +816,7 @@ def _reconstruct_financial_table(lines: List[str]) -> Tuple[Optional[List[List[s
                 "text_parts": [line_text],
             }
         elif current is not None:
-            current["text_parts"].append(line_text)
+            trailing_parts.append(line_text)
             if not current["iban"]:
                 current["iban"] = _find_iban(line_text)
         else:
@@ -814,7 +825,7 @@ def _reconstruct_financial_table(lines: List[str]) -> Tuple[Optional[List[List[s
     if current:
         rows.append(current)
     if len(rows) < 2:
-        return None, None
+        return None, None, None
 
     max_amounts = max(len(r["amounts"]) for r in rows)
     header = ["Date"] + [f"Amount {i + 1}" for i in range(max_amounts)] + ["IBAN", "Description"]
@@ -824,7 +835,8 @@ def _reconstruct_financial_table(lines: List[str]) -> Tuple[Optional[List[List[s
         table.append([r["date"]] + amount_cells + [r["iban"], "\n".join(r["text_parts"])])
 
     preamble = "\n".join(preamble_parts) if preamble_parts else None
-    return table, preamble
+    extra = "\n".join(trailing_parts) if trailing_parts else None
+    return table, preamble, extra
 
 
 def read_pdf(path: str) -> List[Block]:

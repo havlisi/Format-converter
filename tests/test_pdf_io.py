@@ -580,3 +580,27 @@ def test_amount_only_header_fallback_is_rejected_when_first_column_is_not_dates(
     table, _preamble = _reconstruct_columned_table(lines)
 
     assert table is None
+
+
+from core.pdf_io import _reconstruct_financial_table
+
+
+def test_financial_table_returns_trailing_non_amount_lines_as_extra():
+    lines = [
+        "Kontoauszug 03/2026",
+        "01.03.2026 Gutschrift Miete 1.200,00 EUR",
+        "15.03.2026 Lastschrift Strom -85,40 EUR",
+        "Seite 1 von 1",
+        "Erstellt am 31.03.2026",
+    ]
+    table, preamble, extra = _reconstruct_financial_table(lines)
+
+    assert table is not None
+    assert preamble == "Kontoauszug 03/2026"
+    assert extra == "Seite 1 von 1\nErstellt am 31.03.2026"
+    # trailing lines must NOT have been folded into the last row's Description
+    assert "Seite 1 von 1" not in table[-1][-1]
+
+
+def test_financial_table_early_return_is_three_none():
+    assert _reconstruct_financial_table(["nothing here", "no anchors"]) == (None, None, None)
