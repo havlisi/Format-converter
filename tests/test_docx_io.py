@@ -1,4 +1,7 @@
+import builtins
 import os
+import sys
+import pytest
 from docx import Document
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Table, Spacer
@@ -58,6 +61,55 @@ def test_pdf_to_docx_scanned_falls_back_to_block_pipeline(tmp_path, monkeypatch)
 
     assert called["blocks"] == sentinel
     assert os.path.exists(out)
+
+
+def test_pdf_to_docx_import_systemexit_becomes_runtimeerror(tmp_path, monkeypatch):
+    # F2: `from pdf2docx import Converter` can raise SystemExit at import time
+    # (a PyMuPDF version check inside pdf2docx). SystemExit is a BaseException,
+    # so batch.run_batch's `except Exception` would NOT catch it — one bad
+    # environment would kill the whole batch. The import must be guarded so it
+    # surfaces as a normal, catchable RuntimeError instead.
+    #
+    # Approach: patch builtins.__import__ so importing pdf2docx raises
+    # SystemExit, and force the text-layer branch so the import is reached.
+    pdf = str(tmp_path / "src.pdf")
+    out = str(tmp_path / "src.docx")
+    open(pdf, "wb").write(b"%PDF-1.4\n%%EOF\n")
+
+    monkeypatch.setattr(docx_io, "_pdf_has_text_layer", lambda p: True)
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "pdf2docx" or name.startswith("pdf2docx."):
+            raise SystemExit("boom")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.delitem(sys.modules, "pdf2docx", raising=False)
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    with pytest.raises(RuntimeError):
+        docx_io.pdf_to_docx(pdf, out)
+
+
+def test_pdf_has_text_layer_false_for_sparse_stamp_only_pdf(tmp_path):
+    # F4: a scanned page whose only text layer is a 2-word Bates stamp / fax
+    # banner must still route to OCR — a mean of ~2 words/page is below the
+    # density threshold, so _pdf_has_text_layer returns False.
+    pdf = str(tmp_path / "stamp.pdf")
+    doc = SimpleDocTemplate(pdf, pagesize=letter)
+    doc.build([Paragraph("EXHIBIT 12", getSampleStyleSheet()["Normal"])])
+
+    assert docx_io._pdf_has_text_layer(pdf) is False
+
+
+def test_pdf_has_text_layer_true_for_dense_text_pdf(tmp_path):
+    # F4 companion: a real text layer (well over 5 words/page) still takes the
+    # pdf2docx branch.
+    pdf = str(tmp_path / "dense.pdf")
+    _make_text_pdf(pdf)
+
+    assert docx_io._pdf_has_text_layer(pdf) is True
 
 
 def test_write_then_read_text_block(tmp_path):

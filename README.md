@@ -2,13 +2,15 @@
 
 Batch-converts between PDF, XLSX, DOCX, CSV. Content-fidelity (text + tables) by default. **PDF → DOCX
 preserves the source page layout** (fonts, text position, tables, images) via `pdf2docx`; a scanned PDF
-with no text layer is converted through OCR to searchable text with no layout. **PDF → XLSX** places the
-reconstructed transaction table first, then appends every non-row line found around it (holder, IBAN,
-period, balances, footers) as plain rows below.
+with no text layer is converted through OCR to searchable text with no layout. **PDF → XLSX** (and
+**PDF → CSV**, which shares the same reconstruction) places the reconstructed transaction table first,
+then appends the non-row lines found around it (holder, IBAN, period, balances, footers) as plain rows
+below.
 
 ## Setup
 
-    cd converter
+From the repo root (the folder containing `app.py` and `requirements.txt`):
+
     pip install -r requirements.txt
 
 Scanned PDFs (no text layer) also need [Tesseract OCR](https://github.com/UB-Mannheim/tesseract/wiki) installed
@@ -38,8 +40,11 @@ it, a scanned PDF fails with a clear message telling you to install it; a normal
 - Scanned PDF → DOCX carries OCR text only, with no layout (a scan has no text layout to preserve).
 - `pdf2docx` layout fidelity on very complex multi-column or heavily graphical PDFs is good but not exact —
   verify by eye for anything that matters.
-- PDF → XLSX context text is flat rows in reading order below the table, not a positioned copy. A wrapped
-  continuation of the *last* transaction's description may appear in that block instead of the last cell.
+- PDF → XLSX context text is flat rows in reading order below the table (a leading blank line keeps its
+  first row out of the table's own cell range), not a positioned copy. A wrapped continuation of the
+  *last* transaction's description may appear in that block instead of the last cell. PDF → CSV shares
+  the same `read_pdf` reconstruction, so it is affected the same way — the reconstructed table rows come
+  first, then the surrounding context lines.
 - A source file with no extractable content (e.g. a blank PDF) reports an error rather than producing an empty output.
 - Multi-sheet XLSX → CSV concatenates all sheets into one file, separated by a blank row; sheet names aren't preserved.
 - Borderless financial statements (bank/transaction exports with no ruling lines) are reconstructed row-by-row. When

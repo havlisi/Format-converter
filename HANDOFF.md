@@ -308,9 +308,18 @@ for internal use only.
 
 Both borderless reconstructors return `(table, preamble, extra)`. `flush_pending` emits
 the `("table", ...)` block first, then a single `("text", ...)` block joining `preamble`
-(pre-table furniture) and `extra` (amount-free lines after the last row). `extra` is
-guarded to never absorb a line that carries an amount in its own bucket — that guard is
-what keeps the documented standalone-balance-line bug fixed.
+(pre-table furniture) and `extra` (amount-free lines after the last row). The text block
+is prefixed with a blank line so `write_xlsx` (which splits a text block on `\n`, one row
+per line) renders an empty row between the table and the first context line instead of
+butting it against the table's own cell range. `extra` is guarded to never absorb a line that carries an
+amount in its own bucket — that guard is what keeps the documented standalone-balance-line
+bug fixed. For a merged date+amount header column (font-kerning class) where `amount_cols`
+resolves empty, the guard (`_line_has_amount`) now scans the whole line for a bare amount
+instead of only the amount buckets — so the surrounding-text capture no longer silently
+no-ops for that class.
+
+This block-ordering (table first, then context text) is shared `read_pdf` behaviour, so it
+applies to **PDF → CSV** as well, not just PDF → XLSX.
 
 ## Known limitations (also in README.md — keep both in sync if this changes)
 

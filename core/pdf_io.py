@@ -445,6 +445,17 @@ def _column_index_for(x0: float, boundaries: List[float]) -> int:
     return len(boundaries) - 1
 
 
+def _line_has_amount(line_text: str, buckets: List[List[str]], amount_cols: set) -> bool:
+    """True if a physical line carries a monetary value. Normally that's decided from
+    the line's own amount-column buckets — but for a merged date+amount header column
+    (font-kerning class, real Aareal/LBBW files) `amount_cols` resolves empty, and then
+    the whole line is scanned for a bare amount instead so the "amount-free" guards that
+    feed the surrounding-text block still work rather than silently no-op'ing."""
+    if amount_cols:
+        return any(_parse_first_bare_amount(" ".join(buckets[ci])) for ci in amount_cols)
+    return bool(_parse_first_bare_amount(line_text))
+
+
 def _reconstruct_columned_table(
     lines: List[List[dict]],
 ) -> Tuple[Optional[List[List[str]]], Optional[str], Optional[str]]:
@@ -555,6 +566,18 @@ def _reconstruct_columned_table(
     # ended. Everything after a break is discarded until a genuine new row shows up.
     after_page_break = False
 
+    def _flush_pending_tail_into(row: dict) -> None:
+        """Fold every buffered amount-free line into an open row, in source order,
+        then empty the buffer — so `pending_tail` genuinely behaves 'identical to
+        folding in directly', whether the drain is triggered by the next row
+        starting or by an amount-bearing continuation line arriving first."""
+        for tail_text, tail_buckets in pending_tail:
+            row[_RAW_LINES_KEY].append(tail_text)
+            for i, bucket in enumerate(tail_buckets):
+                if bucket:
+                    row[i].append(" ".join(bucket))
+        pending_tail.clear()
+
     for words in lines:
         if words is _PAGE_BREAK:
             after_page_break = True
@@ -605,18 +628,12 @@ def _reconstruct_columned_table(
         if after_page_break and not is_new_row:
             # Repeated page furniture after the previous page's last transaction.
             # An amount-free line here is real trailing text if nothing more
-            # follows — hold it. A line carrying an amount in its own amount
-            # bucket is a standalone balance/total, not furniture: leave the
-            # existing drop untouched rather than relocate a reconcilable figure
-            # into `extra`. An empty `amount_cols` can't prove a line amount-free
-            # — treat it as before (drop), don't sweep everything into `extra`.
-            if (
-                rows
-                and amount_cols
-                and not any(
-                    _parse_first_bare_amount(" ".join(buckets[col_i])) for col_i in amount_cols
-                )
-            ):
+            # follows — hold it. A line carrying an amount is a standalone
+            # balance/total, not furniture: leave the existing drop untouched
+            # rather than relocate a reconcilable figure into `extra`. When
+            # `amount_cols` is empty (merged header), `_line_has_amount` scans
+            # the whole line so the guard still means "amount-free".
+            if rows and not _line_has_amount(line_text, buckets, amount_cols):
                 trailing_parts.append(line_text)
             continue
         after_page_break = False
@@ -629,11 +646,7 @@ def _reconstruct_columned_table(
             # real `extra`.
             trailing_parts.clear()
             if current:
-                for tail_text, tail_buckets in pending_tail:
-                    current[_RAW_LINES_KEY].append(tail_text)
-                    for i, bucket in enumerate(tail_buckets):
-                        if bucket:
-                            current[i].append(" ".join(bucket))
+                _flush_pending_tail_into(current)
                 rows.append(current)
             pending_tail.clear()
             current = {i: [] for i in range(len(columns))}
@@ -673,13 +686,7 @@ def _reconstruct_columned_table(
                 else:
                     pending_orphan_lines.append((line_text, buckets))
             continue
-        elif (
-            rows
-            and amount_cols
-            and not any(
-                _parse_first_bare_amount(" ".join(buckets[col_i])) for col_i in amount_cols
-            )
-        ):
+        elif rows and not _line_has_amount(line_text, buckets, amount_cols):
             # Amount-free, doesn't start a row, and at least one row is already
             # closed: a same-page continuation or closing-summary line. Hold it
             # rather than fold it straight into the open row — if a genuine new
@@ -689,6 +696,13 @@ def _reconstruct_columned_table(
             # the accepted tradeoff on the last row's own wrapped description.
             pending_tail.append((line_text, buckets))
             continue
+
+        # An amount-bearing continuation (or the row-start line itself) reached the
+        # open row: drain any buffered amount-free lines in first, so a multi-line
+        # narrative keeps its source order instead of the buffered line landing
+        # after this one when the next row finally flushes the buffer.
+        if pending_tail and current is not None:
+            _flush_pending_tail_into(current)
 
         current[_RAW_LINES_KEY].append(line_text)
         for i, bucket in enumerate(buckets):
@@ -886,9 +900,16 @@ def _reconstruct_financial_table(
                 "text_parts": [line_text],
             }
         elif current is not None:
-            if amounts:
-                # amount-bearing continuation (running balance, interest total,
-                # closing balance): keep it on the transaction, never siphon into `extra`
+            # amount-bearing continuation (running balance, interest total, closing
+            # balance) stays on the transaction, never siphoned into `extra`. A bare
+            # closing balance ("Neuer Kontostand 1.114,60") has no currency code, so
+            # `amounts` misses it — a bare-amount scan catches it so the line still
+            # folds into the last row instead of displacing a number into `extra`
+            # (mirrors `_reconstruct_columned_table`'s use of `_parse_first_bare_amount`).
+            # Dates are stripped first: "DD.MM.YYYY" otherwise reads as the bare
+            # amount "DD.MM" (`\d+\.\d{2}`), which would wrongly fold a dateline like
+            # "Erstellt am 31.03.2026" into the last row.
+            if amounts or _parse_first_bare_amount(_DATE_RE.sub(" ", line_text)):
                 current["text_parts"].append(line_text)
             else:
                 trailing_parts.append(line_text)
@@ -939,7 +960,10 @@ def read_pdf(path: str) -> List[Block]:
             blocks.append(("table", recon_table))
             context = "\n\n".join(p for p in (preamble, extra) if p)
             if context:
-                blocks.append(("text", context))
+                # Lead with a blank line so write_xlsx (one row per '\n'-split line)
+                # renders an empty row between the last data row and the first
+                # context line, keeping it out of the table's own cell range.
+                blocks.append(("text", "\n" + context))
         else:
             blocks.append((
                 "text",
