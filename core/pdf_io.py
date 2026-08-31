@@ -816,7 +816,12 @@ def _reconstruct_financial_table(
                 "text_parts": [line_text],
             }
         elif current is not None:
-            trailing_parts.append(line_text)
+            if amounts:
+                # amount-bearing continuation (running balance, interest total,
+                # closing balance): keep it on the transaction, never siphon into `extra`
+                current["text_parts"].append(line_text)
+            else:
+                trailing_parts.append(line_text)
             if not current["iban"]:
                 current["iban"] = _find_iban(line_text)
         else:

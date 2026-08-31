@@ -6,6 +6,7 @@ from core.pdf_io import (
     _is_degenerate_table,
     _PAGE_BREAK,
     _ROW_START_DATE_RE,
+    _reconstruct_financial_table,
 )
 import pytest
 
@@ -582,9 +583,6 @@ def test_amount_only_header_fallback_is_rejected_when_first_column_is_not_dates(
     assert table is None
 
 
-from core.pdf_io import _reconstruct_financial_table
-
-
 def test_financial_table_returns_trailing_non_amount_lines_as_extra():
     lines = [
         "Kontoauszug 03/2026",
@@ -604,3 +602,18 @@ def test_financial_table_returns_trailing_non_amount_lines_as_extra():
 
 def test_financial_table_early_return_is_three_none():
     assert _reconstruct_financial_table(["nothing here", "no anchors"]) == (None, None, None)
+
+
+def test_financial_table_trailing_amount_line_stays_on_last_row_not_extra():
+    lines = [
+        "01.03.2026 Gutschrift Miete 1.200,00 EUR",
+        "15.03.2026 Lastschrift Strom -85,40 EUR",
+        "Saldo 1.234,56 EUR",
+    ]
+    table, preamble, extra = _reconstruct_financial_table(lines)
+
+    assert table is not None
+    # an amount-bearing footer (closing balance) must fold into the last
+    # transaction, never be siphoned into `extra`
+    assert "Saldo 1.234,56 EUR" in table[-1][-1]
+    assert extra is None or "Saldo 1.234,56 EUR" not in extra
