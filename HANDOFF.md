@@ -292,6 +292,26 @@ bottom}` word-dict shape as pdfplumber's own `extract_words()`. Low-confidence w
 in `¿...?`. Requires Tesseract installed separately (`winget install UB-Mannheim.TesseractOCR`);
 auto-detects the default Windows install path if not yet on PATH.
 
+## Direct-route conversions & surrounding-text handling
+
+### Direct-route conversions (`core/dispatch.py`)
+
+`_DIRECT_ROUTES` maps a `(source_ext, target_ext)` pair to a function that reads the
+source and writes the target itself, bypassing the `(text, table)` Block model. Checked
+before `_READERS`/`_WRITERS` in `convert()`. Currently one entry: `("pdf", "docx") ->
+docx_io.pdf_to_docx`, which uses `pdf2docx` for text-layer PDFs and falls back to
+`pdf_io.read_pdf` + `write_docx` (the existing OCR path) when `_pdf_has_text_layer` is
+False. New dependency `pdf2docx` pulls **PyMuPDF / AGPL** — noted in README, acceptable
+for internal use only.
+
+### PDF → XLSX context text
+
+Both borderless reconstructors return `(table, preamble, extra)`. `flush_pending` emits
+the `("table", ...)` block first, then a single `("text", ...)` block joining `preamble`
+(pre-table furniture) and `extra` (amount-free lines after the last row). `extra` is
+guarded to never absorb a line that carries an amount in its own bucket — that guard is
+what keeps the documented standalone-balance-line bug fixed.
+
 ## Known limitations (also in README.md — keep both in sync if this changes)
 
 - **OCR is meaningfully less reliable than a real text layer.** Beyond generic digit misreads:
@@ -334,6 +354,13 @@ auto-detects the default Windows install path if not yet on PATH.
   the header's own display text stays garbled).
 - Non-tabular documents (label/value pairs) get date/amount/IBAN extracted but not fully
   column-split.
+- **PDF → DOCX preserves page layout** (via `pdf2docx`, direct-route in `dispatch.py`) — the
+  "content-fidelity, not pixel-perfect" framing applies to every *other* pair, not this one. A
+  *scanned* PDF → DOCX still carries OCR text only with no layout, and `pdf2docx` fidelity on very
+  complex multi-column or heavily graphical PDFs is good but not exact — verify by eye.
+- **PDF → XLSX** surrounding text (holder / IBAN / period / balances / footers) is appended as flat
+  rows in reading order below the table, not positioned. A wrapped continuation of the *last*
+  transaction's description may land in that block instead of the last cell.
 
 ## Real test files used across sessions (NOT in the repo — personal financial data)
 
@@ -367,7 +394,7 @@ this session:
    convention, direction), not the converter. Don't fully trust one method without the other.
 
 The unit tests (`tests/test_pdf_io.py`) cover synthetic fixtures for every fix above and should
-still pass: `python -m pytest tests/ -v` (65 tests as of this session).
+still pass: `python -m pytest tests/ -v` (75 tests as of this session).
 
 ## Pushing updates to GitHub
 
@@ -412,4 +439,10 @@ Working tree clean. All real test files on hand convert without crashing; every 
 verifiable running-balance column reconciles to the printed Endsaldo (RaiBa: 1,494 transactions
 zero mismatches; the 4 Aareal/LBBW files: zero *unexplained* mismatches — all traced to the two
 documented limitations above). GUI rebuilt to pywebview and verified stable across multiple
-scripted launches. 65 tests passing.
+scripted launches. 75 tests passing.
+
+This session added layout-preserving **PDF → DOCX** (via `pdf2docx`, wired as a direct route in
+`dispatch.py`; a scanned PDF with no text layer falls back to the existing OCR block pipeline) and
+changed **PDF → XLSX** to emit the reconstructed transaction table first, then a single text block
+carrying the holder / IBAN / period / balance / footer lines that surround it. New dependency
+`pdf2docx` (pulls PyMuPDF / AGPL).

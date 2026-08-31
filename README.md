@@ -1,6 +1,10 @@
 # Format Converter
 
-Batch-converts between PDF, XLSX, DOCX, CSV. Content-fidelity (text + tables), not pixel-perfect layout.
+Batch-converts between PDF, XLSX, DOCX, CSV. Content-fidelity (text + tables) by default. **PDF → DOCX
+preserves the source page layout** (fonts, text position, tables, images) via `pdf2docx`; a scanned PDF
+with no text layer is converted through OCR to searchable text with no layout. **PDF → XLSX** places the
+reconstructed transaction table first, then appends every non-row line found around it (holder, IBAN,
+period, balances, footers) as plain rows below.
 
 ## Setup
 
@@ -10,6 +14,9 @@ Batch-converts between PDF, XLSX, DOCX, CSV. Content-fidelity (text + tables), n
 Scanned PDFs (no text layer) also need [Tesseract OCR](https://github.com/UB-Mannheim/tesseract/wiki) installed
 separately (`winget install UB-Mannheim.TesseractOCR` on Windows) — `pip install` alone doesn't provide it. Without
 it, a scanned PDF fails with a clear message telling you to install it; a normal text-layer PDF works either way.
+
+`pip install -r requirements.txt` also installs `pdf2docx` (and its dependency **PyMuPDF**, which is
+**AGPL-licensed** — fine for internal use, revisit before any commercial redistribution).
 
 ## Run
 
@@ -26,7 +33,13 @@ it, a scanned PDF fails with a clear message telling you to install it; a normal
   OCR'd numbers against the original scan before trusting them for financial records.** A word Tesseract itself
   flagged as low-confidence is wrapped in `¿...?` in the output so it stands out as worth checking rather than being
   presented as plain, trustworthy text.
-- Content-fidelity, not pixel-perfect: fonts, colors, images, and exact page layout aren't reproduced.
+- Content-fidelity, not pixel-perfect: fonts, colors, images, and exact page layout aren't reproduced —
+  **except PDF → DOCX**, which does preserve the source page layout via `pdf2docx` (see the scope note above).
+- Scanned PDF → DOCX carries OCR text only, with no layout (a scan has no text layout to preserve).
+- `pdf2docx` layout fidelity on very complex multi-column or heavily graphical PDFs is good but not exact —
+  verify by eye for anything that matters.
+- PDF → XLSX context text is flat rows in reading order below the table, not a positioned copy. A wrapped
+  continuation of the *last* transaction's description may appear in that block instead of the last cell.
 - A source file with no extractable content (e.g. a blank PDF) reports an error rather than producing an empty output.
 - Multi-sheet XLSX → CSV concatenates all sheets into one file, separated by a blank row; sheet names aren't preserved.
 - Borderless financial statements (bank/transaction exports with no ruling lines) are reconstructed row-by-row. When
