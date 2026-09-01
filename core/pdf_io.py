@@ -300,15 +300,22 @@ def _is_degenerate_table(extracted: List[list]) -> bool:
                 continue
             if len(set(_DATE_RE.findall(cell))) >= 2 or len(_extract_amounts(cell)) >= 2:
                 return True
-    # pdfplumber sometimes fuses two vertically-adjacent amounts from a borderless
-    # statement into a phantom 2-row grid — each row carrying a single amount in an
-    # alternating column, no header row, nothing else (real corpus: "18,90S EUR" /
-    # "158,85S EUR" pairs, and a currency-less "18,90S" / "158,85S" sibling). A real
-    # table this small still has a text header naming its columns; a fragment whose
-    # every populated cell is nothing but a bare amount is that alignment artifact,
-    # and letting it through flushes and fragments the surrounding statement's
-    # continuous reconstruction.
-    if rows <= 2:
+    # A real table needs a header row plus at least one data row, so a lone single
+    # row is never one — mid-borderless-statement, pdfplumber occasionally reports a
+    # 1-row "table" from a stray aligned fragment (real corpus: one cell an
+    # orphaned 31-char reference hash, the other a bare letter). Letting it through
+    # flushes and fragments the surrounding statement's continuous reconstruction;
+    # its text still survives via the plainer fallback.
+    if rows == 1:
+        return True
+    # Same fragmentation, two rows: pdfplumber fuses two vertically-adjacent
+    # amounts from a borderless statement into a phantom 2x2 grid — each row a
+    # single amount in an alternating column, no header, nothing else (real corpus:
+    # "18,90S EUR" / "158,85S EUR" pairs, and a currency-less "18,90S" / "158,85S"
+    # sibling). A real table this small still has a text header naming its columns;
+    # a fragment whose every populated cell is nothing but a bare amount is the
+    # alignment artifact.
+    if rows == 2:
         populated = [str(cell).strip() for row in extracted for cell in row if cell not in (None, "")]
         if populated and all(_LONE_AMOUNT_CELL_RE.fullmatch(cell) for cell in populated):
             return True
