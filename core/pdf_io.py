@@ -65,8 +65,11 @@ _IBAN_RE = re.compile(r"\b[A-Z]{2}\d{2}(?:[A-Z0-9]{10,30}|(?:\s\d{2,4}){2,8})\b"
 # A decimal amount with no currency requirement — only used once a word has already
 # been confined to a column whose own header says it's an amount field (see the
 # column-position reconstruction below), so the currency check that _AMOUNT_RE needs
-# for safety in free text isn't necessary here.
-_BARE_AMOUNT_RE = re.compile(rf"([+-]\s?)?({_AMOUNT_NUM})\s?([HS])?")
+# for safety in free text isn't necessary here. The trailing Haben/Soll marker must
+# not be followed by another letter — otherwise the "S" beginning a word glued after
+# the number (a "Summe"/"Saldo" summary label folded onto a still-open row across a
+# page break) reads as a Soll marker and silently negates a positive balance.
+_BARE_AMOUNT_RE = re.compile(rf"([+-]\s?)?({_AMOUNT_NUM})\s?([HS](?![A-Za-z]))?")
 # A date whose year wrapped onto the next physical line in a narrow column
 # ("03.01." then "2022" below it) — matched once both fragments are gathered into
 # the same header-derived date column.
@@ -807,8 +810,29 @@ def _reconstruct_columned_table(
         [_parse_first_bare_amount(full_text_parts[col_i]) for col_i in amount_col_order]
         for full_text_parts in full_text_parts_by_row
     ]
-    is_split_pair = len(amount_col_order) == 2 and not any(
-        all(vals) for vals in own_bucket_amounts_by_row
+    # The amount region of each row — the amount columns plus one column of slack to
+    # their left — read as one string in column order. Immune to the right-alignment
+    # drift that leaves a value's own x-bucket empty while it sits in the neighbour's
+    # (real StarMoney statements), so it is the reliable basis for both the pair
+    # classification just below and the per-row assignment further down.
+    pool_lo = max(min(amount_col_order) - 1, 0) if amount_col_order else 0
+    pooled_amounts_by_row = [
+        _all_bare_amounts(" ".join(full_text_parts[ci] for ci in range(pool_lo, len(columns))))
+        for full_text_parts in full_text_parts_by_row
+    ]
+    # A both-always-present pair (Betrag + Saldo, or Originalumsatz + EUR-Umsatz)
+    # shows two distinct amounts in its amount region on essentially every row; a
+    # real debit/credit split (Belastung / Gutschrift — exactly one side filled per
+    # row by design) shows one. Decided from the pool, not the per-column buckets,
+    # which the drift makes look like a split even when both values are present.
+    both_present_pair = (
+        len(amount_col_order) == 2
+        and sum(1 for p in pooled_amounts_by_row if len(p) == 2 and len(set(p)) == 2) / len(rows) >= 0.7
+    )
+    is_split_pair = (
+        len(amount_col_order) == 2
+        and not both_present_pair
+        and not any(all(vals) for vals in own_bucket_amounts_by_row)
     )
 
     row_outputs = []
@@ -816,9 +840,21 @@ def _reconstruct_columned_table(
     valid_amounts = 0
     valid_dates = 0
     total_amount_rows = len(rows) if amount_col_order else 0
-    for r, full_text_parts, row_amounts in zip(rows, full_text_parts_by_row, row_amounts_by_row):
+    for r, full_text_parts, row_amounts, pooled in zip(
+        rows, full_text_parts_by_row, row_amounts_by_row, pooled_amounts_by_row
+    ):
         amount_values = {col_i: "" for col_i in amount_col_order}
-        if is_split_pair and len(row_amounts) == 1:
+        if both_present_pair and len(pooled) == 2 and len(set(pooled)) == 2:
+            # A confirmed Betrag + Saldo layout: take both values straight from the
+            # amount region in column order (Betrag before Saldo), bypassing the
+            # per-column buckets the right-alignment drift scrambles. Covers the
+            # regular rows and the fee/interest rows alike — the latter carry a
+            # small flow and a genuine printed balance that the drift pushes a
+            # bucket left, which the older split-pair routing mistook for a lone
+            # debit-or-credit and filed under the wrong column.
+            for col_i, value in zip(amount_col_order, pooled):
+                amount_values[col_i] = value
+        elif is_split_pair and len(row_amounts) == 1:
             # Route the one value found by its own sign — the universal convention
             # is debit (negative) before credit (positive) — rather than always
             # placing it in the first amount column regardless of which side it's
