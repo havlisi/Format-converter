@@ -71,6 +71,18 @@ _BARE_AMOUNT_RE = re.compile(rf"([+-]\s?)?({_AMOUNT_NUM})\s?([HS])?")
 # ("03.01." then "2022" below it) — matched once both fragments are gathered into
 # the same header-derived date column.
 _SPLIT_DATE_RE = re.compile(r"(\d{1,2}\.\d{1,2}\.)\s*(\d{4})")
+# Leading day+month of a date fragment in either convention ("02.01." -> ('2','1'),
+# "28/03/2025" -> ('28','3')), leading zeros stripped so "02.01." and "2.1.2023"
+# compare equal. Used to confirm a year recovered from a row's accumulated date
+# bucket belongs to that row and isn't a different date bled in from elsewhere.
+_DAY_MONTH_RE = re.compile(r"\s*(\d{1,2})[./](\d{1,2})")
+
+
+def _day_month(fragment: str) -> Optional[Tuple[str, str]]:
+    match = _DAY_MONTH_RE.match(fragment)
+    if not match:
+        return None
+    return match.group(1).lstrip("0") or "0", match.group(2).lstrip("0") or "0"
 # Marks the start of a new row within a header-derived date column: the bucket must
 # *begin* with a (possibly partial, for a year wrapped onto the next line) date.
 # Trailing content is allowed — some exports glue the date straight onto the next
@@ -129,6 +141,10 @@ _HEADER_DATE_LABEL_RE = re.compile(r"(datum|date|buch|wert|abrechnung)", re.IGNO
 _HEADER_AMOUNT_LABEL_RE = re.compile(
     r"(betrag|saldo|umsatz|amount|balance|belastung|gutschrift|credit|debit)", re.IGNORECASE
 )
+# The subset of amount labels that name a running balance rather than a per-row
+# flow — lets the reconstruction verify Saldo[i] == Saldo[i-1] + Betrag[i] and
+# reject a column model that doesn't hold up (see _reconstruct_columned_table).
+_HEADER_BALANCE_LABEL_RE = re.compile(r"(saldo|balance|kontostand)", re.IGNORECASE)
 # Header words closer together than this (points) are one multi-word column label
 # (e.g. "Sender / Empfänger"); farther apart marks a new column. Real statements seen
 # so far put same-label gaps at ~2-3pt and different-column gaps at ~9pt or more —
@@ -150,6 +166,13 @@ _ANCHOR_DATE_KEY = "_anchor_date"
 # failed detection (e.g. a borderless statement collapsed into one text-heavy column)
 # rather than a real table, so the financial-anchor fallback gets a chance instead.
 _MIN_POPULATED_RATIO = 0.35
+
+# A single monetary value, optionally sign-marked and optionally currency-tagged
+# ("18,90S", "18,90S EUR", "-1.037,80", "212,96H EUR") and nothing else — used to
+# spot the phantom mini-tables described in _is_degenerate_table.
+_LONE_AMOUNT_CELL_RE = re.compile(
+    rf"[+-]?\s?{_AMOUNT_NUM}\s?[HS]?(?:\s*(?:EUR|USD|GBP|CHF|RSD))?"
+)
 
 
 def _find_iban(text: str) -> str:
@@ -173,6 +196,33 @@ def _parse_first_bare_amount(text: str) -> str:
     if not match:
         return ""
     return _normalize_amount(match.group(1), match.group(2), match.group(3))
+
+
+def _all_bare_amounts(text: str) -> List[str]:
+    """Every decimal amount in text, sign-normalized, in reading order — the
+    currency suffix _extract_amounts insists on is not required (see
+    _BARE_AMOUNT_RE). Only used on text already confined to amount columns."""
+    return [_normalize_amount(s, a, m) for s, a, m in _BARE_AMOUNT_RE.findall(text)]
+
+
+def _amount_to_float(text: str) -> Optional[float]:
+    """A normalized amount string ("-1.234,56", "1234.56", "957,23") to float,
+    both decimal conventions; None if it doesn't parse. For arithmetic checks
+    only — display always keeps the original string."""
+    text = (text or "").strip()
+    if not text:
+        return None
+    negative = text.startswith("-")
+    digits = text.lstrip("+-").strip()
+    if "," in digits and digits.rfind(",") > digits.rfind("."):
+        digits = digits.replace(".", "").replace(",", ".")
+    else:
+        digits = digits.replace(",", "")
+    try:
+        value = float(digits)
+    except ValueError:
+        return None
+    return -value if negative else value
 
 
 def _normalize_date(text: str, inferred_year: Optional[str] = None) -> str:
@@ -250,6 +300,18 @@ def _is_degenerate_table(extracted: List[list]) -> bool:
                 continue
             if len(set(_DATE_RE.findall(cell))) >= 2 or len(_extract_amounts(cell)) >= 2:
                 return True
+    # pdfplumber sometimes fuses two vertically-adjacent amounts from a borderless
+    # statement into a phantom 2-row grid — each row carrying a single amount in an
+    # alternating column, no header row, nothing else (real corpus: "18,90S EUR" /
+    # "158,85S EUR" pairs, and a currency-less "18,90S" / "158,85S" sibling). A real
+    # table this small still has a text header naming its columns; a fragment whose
+    # every populated cell is nothing but a bare amount is that alignment artifact,
+    # and letting it through flushes and fragments the surrounding statement's
+    # continuous reconstruction.
+    if rows <= 2:
+        populated = [str(cell).strip() for row in extracted for cell in row if cell not in (None, "")]
+        if populated and all(_LONE_AMOUNT_CELL_RE.fullmatch(cell) for cell in populated):
+            return True
     return False
 
 
@@ -790,6 +852,31 @@ def _reconstruct_columned_table(
                     claimed.add(row_amounts[ai])
                     ai += 1
 
+            # Right-aligned amount columns whose figures render a hair left of the
+            # header label they sit under (real StarMoney statements: a "-234,57"
+            # starts at x≈459 while the Betrag/Steuer column boundary is x≈459.4)
+            # drift one bucket left — every amount column's own bucket then reads
+            # empty or holds the neighbour's value, and there's no currency code to
+            # recover them by. When the amount columns plus one column of slack to
+            # their left carry *exactly* one bare amount per amount column, assign
+            # them positionally in reading order (which, for this layout, is the
+            # header's own column order). Only reached when the per-column pass
+            # above left a gap, so a cleanly-aligned statement never hits this.
+            if len(amount_col_order) >= 2 and any(not amount_values[c] for c in amount_col_order):
+                lo = max(min(amount_col_order) - 1, 0)
+                pool: List[str] = []
+                for ci in range(lo, len(columns)):
+                    pool.extend(_all_bare_amounts(full_text_parts[ci]))
+                # Exactly one amount per amount column, and they aren't all the
+                # same number — a single figure that merely drifted into two
+                # buckets (a fee row printing only "0,09", picked up in both the
+                # Steuer bucket and the Saldo bucket) would give an all-identical
+                # pool, and splitting it across Betrag+Saldo would fabricate a
+                # balance that was never in the source.
+                if len(pool) == len(amount_col_order) and len(set(pool)) > 1:
+                    for col_i, value in zip(amount_col_order, pool):
+                        amount_values[col_i] = value
+
         if is_split_pair:
             # By design only one column is ever expected to be populated — the row
             # is fully captured as long as routing found that one value.
@@ -814,7 +901,23 @@ def _reconstruct_columned_table(
                     # can plant a full, dated match ahead of it in the fallback
                     # chain below, and _normalize_date has no way to tell that
                     # apart from the row's own real date.
-                    value = _normalize_date(r.get(_ANCHOR_DATE_KEY, full_text_parts[i]), inferred_year)
+                    anchor_snapshot = r.get(_ANCHOR_DATE_KEY, full_text_parts[i])
+                    value = _normalize_date(anchor_snapshot, inferred_year)
+                    if not _DATE_VALID_RE.fullmatch(value):
+                        # A date column narrow enough that the year renders on the
+                        # row's *next* physical line ("02.01." then "2023" below)
+                        # leaves the snapshot a yearless "DD.MM.". The year did
+                        # land in the column's accumulated bucket; take the full
+                        # date from there instead — but only when its day+month
+                        # still match the snapshot, so the page-footer date range
+                        # the snapshot exists to fend off can't substitute itself.
+                        retry = _normalize_date(full_text_parts[i], inferred_year)
+                        if (
+                            _DATE_VALID_RE.fullmatch(retry)
+                            and _day_month(retry) is not None
+                            and _day_month(retry) == _day_month(anchor_snapshot)
+                        ):
+                            value = retry
                 else:
                     value = _normalize_date(full_text_parts[i], inferred_year)
                 if i == anchor_date_col and _DATE_VALID_RE.fullmatch(value):
@@ -836,6 +939,32 @@ def _reconstruct_columned_table(
         return None, None, None
     if valid_dates / len(rows) < 0.9:
         return None, None, None
+
+    # Arithmetic sanity gate: when the layout is a per-row flow column plus a
+    # running-balance column (Betrag + Saldo), the balance must move by the flow
+    # from one row to the next. If that identity fails across most consecutive
+    # rows, the columns were misidentified or the values landed in the wrong ones
+    # — ship nothing rather than a statement whose numbers silently don't add up.
+    balance_cols = [i for i in amount_col_order if _HEADER_BALANCE_LABEL_RE.search(labels[i])]
+    flow_cols = [i for i in amount_col_order if i not in balance_cols]
+    if len(amount_col_order) == 2 and len(balance_cols) == 1 and len(flow_cols) == 1:
+        bcol, fcol = balance_cols[0], flow_cols[0]
+        prev_balance: Optional[float] = None
+        checked = reconciled = 0
+        for row_out in row_outputs:
+            balance = _amount_to_float(row_out[bcol])
+            flow = _amount_to_float(row_out[fcol])
+            if balance is None or flow is None:
+                if balance is not None:
+                    prev_balance = balance
+                continue
+            if prev_balance is not None:
+                checked += 1
+                if abs(prev_balance + flow - balance) <= 0.02:
+                    reconciled += 1
+            prev_balance = balance
+        if checked >= 5 and reconciled / checked < 0.85:
+            return None, None, None
 
     header_row = labels + ["IBAN"]
     if not any_iban:
