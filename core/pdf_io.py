@@ -5,7 +5,7 @@ import pdfplumber
 from xml.sax.saxutils import escape
 from reportlab.lib.pagesizes import letter
 from reportlab.lib import colors
-from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Table, TableStyle, Spacer
 from core.types import Block
 from typing import List, Optional, Tuple
@@ -977,10 +977,21 @@ def _reconstruct_columned_table(
 
     # Sanity gate: if amount/date columns mostly failed to parse, this document's
     # layout doesn't actually fit the column model we built — don't ship a table with
-    # silently wrong or missing financial values, fall back to the plainer reconstruction.
-    if total_amount_rows and valid_amounts / total_amount_rows < 0.9:
+    # silently wrong or missing financial values, fall back to the plainer
+    # reconstruction. A handful of absolute failures is tolerated regardless of the
+    # ratio: a short statement (a newly-opened account with only its quarterly
+    # interest/tax closing rows — messy multi-line descriptions, 0,00 amounts, a
+    # repeated page header folded in) would otherwise fail the 90% bar on 2-3 odd
+    # rows and come out shaped differently from a long statement of the very same
+    # bank, breaking the per-bank column signature the recon step keys on.
+    _GATE_ABS_GRACE = 3
+    if (
+        total_amount_rows
+        and valid_amounts / total_amount_rows < 0.9
+        and total_amount_rows - valid_amounts > _GATE_ABS_GRACE
+    ):
         return None, None, None
-    if valid_dates / len(rows) < 0.9:
+    if valid_dates / len(rows) < 0.9 and len(rows) - valid_dates > _GATE_ABS_GRACE:
         return None, None, None
 
     # Arithmetic sanity gate: when the layout is a per-row flow column plus a
@@ -1177,30 +1188,83 @@ def read_pdf(path: str) -> List[Block]:
     return blocks
 
 
+def _drop_empty_columns(rows: List[list]) -> List[list]:
+    """Remove columns that are blank in every row. Spreadsheet exports of bank
+    statements routinely carry 20+ mostly-unused columns; keeping them squeezes
+    each remaining column so narrow that a long description cell wraps into a
+    row taller than the page — which reportlab cannot lay out at all."""
+    width = max((len(r) for r in rows), default=0)
+    keep = [c for c in range(width) if any(c < len(r) and str(r[c]).strip() for r in rows)]
+    if not keep:
+        keep = list(range(max(width, 1)))
+    return [[(row[c] if c < len(row) else "") for c in keep] for row in rows]
+
+
+def _table_flowable(rows: List[list], doc_width: float, cell_style: ParagraphStyle) -> Table:
+    rows = _drop_empty_columns(rows)
+    n = max((len(r) for r in rows), default=1) or 1
+    wrapped = [[Paragraph(escape(str(cell)), cell_style) for cell in row] for row in rows]
+    # repeatRows: re-print the header on every page. splitInRow: let a single row
+    # that is still taller than the remaining space break across the page boundary
+    # instead of raising a layout error (real statements have description cells
+    # dozens of lines tall).
+    table = Table(wrapped, colWidths=[doc_width / n] * n, repeatRows=1, splitInRow=1)
+    table.setStyle(TableStyle([
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+        ("BACKGROUND", (0, 0), (-1, 0), colors.whitesmoke),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+    ]))
+    return table
+
+
 def write_pdf(blocks: List[Block], path: str) -> None:
-    doc = SimpleDocTemplate(path, pagesize=letter)
     styles = getSampleStyleSheet()
-    story = []
-    for kind, content in blocks:
-        if kind == "text":
-            for line in content.split("\n"):
-                if line.strip():
-                    story.append(Paragraph(escape(line), styles["Normal"]))
+    # Data tables get a compact style; a wide statement export never fits at the
+    # 10pt body size.
+    cell_style = ParagraphStyle("cell", parent=styles["Normal"], fontSize=7, leading=8.4)
+
+    def build(story_factory) -> None:
+        doc = SimpleDocTemplate(
+            path, pagesize=letter,
+            topMargin=36, bottomMargin=36, leftMargin=36, rightMargin=36,
+        )
+        story = story_factory(doc)
+        if not story:
+            story = [Paragraph(" ", styles["Normal"])]
+        doc.build(story)
+
+    def rich(doc) -> list:
+        story = []
+        for kind, content in blocks:
+            if kind == "text":
+                for line in content.split("\n"):
+                    if line.strip():
+                        story.append(Paragraph(escape(line), styles["Normal"]))
+                story.append(Spacer(1, 12))
+            else:
+                story.append(_table_flowable(content, doc.width, cell_style))
+                story.append(Spacer(1, 12))
+        return story
+
+    def flat(doc) -> list:
+        """Fallback: every table row as one pipe-joined paragraph, so a table that
+        still won't lay out (e.g. a single cell taller than a whole page) degrades
+        to readable text rather than failing the whole conversion."""
+        story = []
+        for kind, content in blocks:
+            if kind == "text":
+                for line in content.split("\n"):
+                    if line.strip():
+                        story.append(Paragraph(escape(line), styles["Normal"]))
+            else:
+                for row in content:
+                    cells = [str(c).strip() for c in row if str(c).strip()]
+                    if cells:
+                        story.append(Paragraph(escape(" | ".join(cells)), cell_style))
             story.append(Spacer(1, 12))
-        else:
-            num_cols = max((len(row) for row in content), default=1) or 1
-            col_width = doc.width / num_cols
-            wrapped = [
-                [Paragraph(escape(str(cell)), styles["Normal"]) for cell in row]
-                for row in content
-            ]
-            table = Table(wrapped, colWidths=[col_width] * num_cols)
-            table.setStyle(TableStyle([
-                ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
-                ("BACKGROUND", (0, 0), (-1, 0), colors.whitesmoke),
-            ]))
-            story.append(table)
-            story.append(Spacer(1, 12))
-    if not story:
-        story.append(Paragraph(" ", styles["Normal"]))
-    doc.build(story)
+        return story
+
+    try:
+        build(rich)
+    except Exception:
+        build(flat)
