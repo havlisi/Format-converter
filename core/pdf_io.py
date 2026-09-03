@@ -3,9 +3,10 @@ import re
 import shutil
 import pdfplumber
 from xml.sax.saxutils import escape
-from reportlab.lib.pagesizes import letter
+from reportlab.lib.pagesizes import letter, landscape
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.pdfbase.pdfmetrics import stringWidth
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Table, TableStyle, Spacer
 from core.types import Block
 from typing import List, Optional, Tuple
@@ -1200,71 +1201,155 @@ def _drop_empty_columns(rows: List[list]) -> List[list]:
     return [[(row[c] if c < len(row) else "") for c in keep] for row in rows]
 
 
-def _table_flowable(rows: List[list], doc_width: float, cell_style: ParagraphStyle) -> Table:
-    rows = _drop_empty_columns(rows)
-    n = max((len(r) for r in rows), default=1) or 1
-    wrapped = [[Paragraph(escape(str(cell)), cell_style) for cell in row] for row in rows]
-    # repeatRows: re-print the header on every page. splitInRow: let a single row
-    # that is still taller than the remaining space break across the page boundary
-    # instead of raising a layout error (real statements have description cells
-    # dozens of lines tall).
-    table = Table(wrapped, colWidths=[doc_width / n] * n, repeatRows=1, splitInRow=1)
-    table.setStyle(TableStyle([
-        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
-        ("BACKGROUND", (0, 0), (-1, 0), colors.whitesmoke),
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-    ]))
-    return table
+_CELL_FONT = "Helvetica"
+_CELL_SIZE = 7
+# Left+right cell inset used in the table style below; a column must be at least
+# this much wider than its widest word or that word wraps character by character.
+_CELL_INSET = 2.0
+
+
+def _col_widths(rows: List[list], n: int) -> Tuple[List[float], List[float]]:
+    """Per-column (minimum, preferred) width in points. Minimum is the widest
+    single word in the column (text cannot break inside a word — that is exactly
+    the "Kon to au s zu g" shredding that an equal split causes on a wide sheet);
+    preferred is the widest whole cell, capped."""
+    pad = 2 * _CELL_INSET + 3.0
+    cap = 210.0
+    mins, prefs = [], []
+    for c in range(n):
+        widest_word = 0.0
+        widest_cell = 0.0
+        for r in rows:
+            if c >= len(r):
+                continue
+            text = str(r[c])
+            widest_cell = max(widest_cell, stringWidth(text, _CELL_FONT, _CELL_SIZE))
+            for word in text.split():
+                widest_word = max(widest_word, stringWidth(word, _CELL_FONT, _CELL_SIZE))
+        mins.append(min(max(widest_word + pad, 18.0), cap))
+        prefs.append(min(max(widest_cell + pad, mins[-1]), cap))
+    return mins, prefs
+
+
+def _fit_widths(mins: List[float], prefs: List[float], avail: float) -> Optional[List[float]]:
+    """Column widths that use the full available width, split in proportion to
+    each column's preferred (content) width but never below its minimum (widest
+    word). None if even the minimums do not fit — the caller then switches to the
+    per-row record layout."""
+    if sum(mins) > avail:
+        return None
+    total_pref = sum(prefs) or 1.0
+    widths = [max(m, avail * p / total_pref) for m, p in zip(mins, prefs)]
+    # Clamping to the minimums may have pushed the total over `avail`; take the
+    # excess back from the columns that have room above their own minimum.
+    over = sum(widths) - avail
+    if over > 0:
+        headroom = [w - m for w, m in zip(widths, mins)]
+        total_room = sum(headroom) or 1.0
+        widths = [w - over * (h / total_room) for w, h in zip(widths, headroom)]
+    return widths
+
+
+def _looks_like_header_row(cells: List) -> bool:
+    """A real column-header row: every cell filled, none a bare number."""
+    values = [str(c).strip() for c in cells]
+    if not values or any(not v for v in values):
+        return False
+    return not any(re.fullmatch(r"-?[\d.,]+", v) for v in values)
 
 
 def write_pdf(blocks: List[Block], path: str) -> None:
     styles = getSampleStyleSheet()
-    # Data tables get a compact style; a wide statement export never fits at the
-    # 10pt body size.
-    cell_style = ParagraphStyle("cell", parent=styles["Normal"], fontSize=7, leading=8.4)
+    cell_style = ParagraphStyle("cell", parent=styles["Normal"],
+                                fontName=_CELL_FONT, fontSize=_CELL_SIZE, leading=_CELL_SIZE * 1.2)
+    label_style = ParagraphStyle("label", parent=cell_style, fontName="Helvetica-Bold")
+    margin = 36.0
+    portrait_w = letter[0] - 2 * margin
+    landscape_w = letter[1] - 2 * margin
 
-    def build(story_factory) -> None:
-        doc = SimpleDocTemplate(
-            path, pagesize=letter,
-            topMargin=36, bottomMargin=36, leftMargin=36, rightMargin=36,
-        )
-        story = story_factory(doc)
-        if not story:
-            story = [Paragraph(" ", styles["Normal"])]
+    story = []
+    page_landscape = False
+
+    for kind, content in blocks:
+        if kind == "text":
+            for line in content.split("\n"):
+                if line.strip():
+                    story.append(Paragraph(escape(line), styles["Normal"]))
+            story.append(Spacer(1, 12))
+            continue
+
+        rows = _drop_empty_columns(content)
+        n = max((len(r) for r in rows), default=1) or 1
+        mins, prefs = _col_widths(rows, n)
+
+        widths = _fit_widths(mins, prefs, portrait_w)
+        if widths is None:
+            widths = _fit_widths(mins, prefs, landscape_w)
+            if widths is not None:
+                page_landscape = True
+
+        if widths is not None:
+            # A real grid fits (in portrait, or landscape for a wider sheet).
+            wrapped = [[Paragraph(escape(str(c)), cell_style) for c in r] for r in rows]
+            table = Table(wrapped, colWidths=widths, repeatRows=1, splitInRow=1)
+            table.setStyle(TableStyle([
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+                ("BACKGROUND", (0, 0), (-1, 0), colors.whitesmoke),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (-1, -1), _CELL_INSET),
+                ("RIGHTPADDING", (0, 0), (-1, -1), _CELL_INSET),
+                ("TOPPADDING", (0, 0), (-1, -1), 1.0),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 1.0),
+            ]))
+            story.append(table)
+            story.append(Spacer(1, 12))
+        elif rows and _looks_like_header_row(rows[0]):
+            # Too many columns for a readable grid at any page size, but there is
+            # a real header row — emit one labelled block per row, every value on
+            # its own "Header: value" line. Nothing is dropped.
+            header = [str(c).strip() for c in rows[0]]
+            for r in rows[1:]:
+                for i, cell in enumerate(r):
+                    val = str(cell).strip()
+                    if not val:
+                        continue
+                    lbl = header[i] if i < len(header) and header[i] else f"Col {i + 1}"
+                    story.append(Paragraph(f"<b>{escape(lbl)}:</b> {escape(val)}", cell_style))
+                story.append(Spacer(1, 6))
+            story.append(Spacer(1, 12))
+        else:
+            # Too wide and no dependable header row (metadata rows on top, blank
+            # header cells): emit each row as its non-empty cells joined, wrapped.
+            for r in rows:
+                cells = [str(c).strip() for c in r if str(c).strip()]
+                if cells:
+                    style = label_style if r is rows[0] else cell_style
+                    story.append(Paragraph(escape("  ·  ".join(cells)), style))
+            story.append(Spacer(1, 12))
+
+    if not story:
+        story = [Paragraph(" ", styles["Normal"])]
+
+    pagesize = landscape(letter) if page_landscape else letter
+    doc = SimpleDocTemplate(path, pagesize=pagesize,
+                            topMargin=margin, bottomMargin=margin,
+                            leftMargin=margin, rightMargin=margin)
+    try:
         doc.build(story)
-
-    def rich(doc) -> list:
-        story = []
+    except Exception:
+        # Absolute last resort: flatten every remaining table-ish flowable to text.
+        flat_story = []
         for kind, content in blocks:
             if kind == "text":
                 for line in content.split("\n"):
                     if line.strip():
-                        story.append(Paragraph(escape(line), styles["Normal"]))
-                story.append(Spacer(1, 12))
-            else:
-                story.append(_table_flowable(content, doc.width, cell_style))
-                story.append(Spacer(1, 12))
-        return story
-
-    def flat(doc) -> list:
-        """Fallback: every table row as one pipe-joined paragraph, so a table that
-        still won't lay out (e.g. a single cell taller than a whole page) degrades
-        to readable text rather than failing the whole conversion."""
-        story = []
-        for kind, content in blocks:
-            if kind == "text":
-                for line in content.split("\n"):
-                    if line.strip():
-                        story.append(Paragraph(escape(line), styles["Normal"]))
+                        flat_story.append(Paragraph(escape(line), styles["Normal"]))
             else:
                 for row in content:
                     cells = [str(c).strip() for c in row if str(c).strip()]
                     if cells:
-                        story.append(Paragraph(escape(" | ".join(cells)), cell_style))
-            story.append(Spacer(1, 12))
-        return story
-
-    try:
-        build(rich)
-    except Exception:
-        build(flat)
+                        flat_story.append(Paragraph(escape(" | ".join(cells)), cell_style))
+            flat_story.append(Spacer(1, 12))
+        SimpleDocTemplate(path, pagesize=letter).build(
+            flat_story or [Paragraph(" ", styles["Normal"])]
+        )
